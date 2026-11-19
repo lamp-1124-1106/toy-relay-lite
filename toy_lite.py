@@ -1,5 +1,5 @@
 """
-toy_lite.py — 零依赖玩具中继 + MCP 服务
+toy_lite.py — 零依赖玩具中继 + MCP 服务 (v2)
 只用 Python 标准库, 不需要 fastapi / uvicorn / mcp / pydantic。
 手机 (Pydroid 3) 上可直接跑。
 
@@ -10,9 +10,11 @@ toy_lite.py — 零依赖玩具中继 + MCP 服务
   GET  /                 健康信息
   GET  /health           存活探针
   GET  /relay/           中继控制页 (Web Bluetooth)
-  GET  /stream           SSE 状态推送
+  GET  /stream           SSE 状态推送 (chunked)
   GET  /state            当前状态
   POST /mcp/             MCP Streamable HTTP 端点
+  GET  /mcp/             MCP SSE 流 (server -> client)
+  DELETE /mcp/           结束 MCP 会话
   POST /toy/<motor>      HTTP 控制端点 (suction/vibration/electric/stop)
 """
 import json
@@ -31,6 +33,11 @@ STATE_PATH = os.path.join(ROOT, "state", "state.json")
 
 MOTORS = ("suction", "vibration", "electric")
 MOTOR_CN = {"suction": "吮吸", "vibration": "震动", "electric": "电流"}
+
+# MCP 协议版本: 客户端要哪个我们回哪个 (Kotlin SDK 常要 2025-06-18 / 2025-03-26)
+SUPPORTED_PROTOOLS = ("2025-06-18", "2025-03-26", "2024-11-05")
+
+SESSION_ID = "toy-lite-" + secrets.token_hex(8)
 
 _lock = threading.Lock()
 _subs = []  # SSE 订阅者队列列表
@@ -164,7 +171,7 @@ TOOLS = [
     },
     {
         "name": "toy_pattern",
-        "description": "播放一段节奏 (波形)。type: wave(正弦) / pulse(方波) / climb(渐强渐弱) / constant(恒定)。high/low 为强度上下限 0-100, duration 为持续秒数。",
+        "description": "播放一段节奏 (波形)。type: wave(波浪) / pulse(脉冲) / climb(攀升) / constant(恒定)。high/low 为强度上下限 0-100, duration 为持续秒数。",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -253,20 +260,21 @@ def call_tool(name, args):
 
 
 def handle_mcp(req):
-    """req: 已解析的 JSON-RPC 字典 -> (响应 dict 或 None, 错误信息)"""
+    """req: 已解析的 JSON-RPC 字典 -> 响应 dict 或 None (通知)"""
     method = req.get("method", "")
     rid = req.get("id")
     params = req.get("params") or {}
 
     if method == "initialize":
-        ver = params.get("protocolVersion") or "2024-11-05"
+        want = params.get("protocolVersion")
+        ver = want if want in SUPPORTED_PROTOOLS else SUPPORTED_PROTOOLS[0]
         return {
             "jsonrpc": "2.0",
             "id": rid,
             "result": {
                 "protocolVersion": ver,
                 "capabilities": {"tools": {"listChanged": False}},
-                "serverInfo": {"name": "toy-lite", "version": "1.0.0"},
+                "serverInfo": {"name": "toy-lite", "version": "2.0.0"},
             },
         }
 
@@ -294,9 +302,22 @@ def handle_mcp(req):
     return {"jsonrpc": "2.0", "id": rid, "error": {"code": -32601, "message": "Method not found: " + str(method)}}
 
 
+def handle_mcp_batch(reqs):
+    out = []
+    for r in reqs:
+        try:
+            resp = handle_mcp(r)
+        except Exception as e:
+            resp = {"jsonrpc": "2.0", "id": r.get("id"),
+                    "error": {"code": -32603, "message": "Internal error: %s" % e}}
+        if resp is not None:
+            out.append(resp)
+    return out or None
+
+
 # ---------------- HTTP ----------------
 class Handler(BaseHTTPRequestHandler):
-    server_version = "ToyLite/1.0"
+    server_version = "ToyLite/2.0"
     protocol_version = "HTTP/1.1"
 
     def log_message(self, fmt, *a):
@@ -305,7 +326,8 @@ class Handler(BaseHTTPRequestHandler):
     def _cors(self):
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Headers", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+        self.send_header("Access-Control-Expose-Headers", "Mcp-Session-Id, Mcp-Protocol-Version")
 
     def _json(self, obj, code=200, extra=None):
         body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
@@ -313,6 +335,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self._cors()
+        self.send_header("Mcp-Session-Id", SESSION_ID)
         for k, v in (extra or {}).items():
             self.send_header(k, v)
         self.end_headers()
@@ -328,17 +351,43 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _chunk(self, text):
+        """写一个 HTTP/1.1 chunk"""
+        data = text.encode("utf-8")
+        self.wfile.write(b"%X\r\n" % len(data) + data + b"\r\n")
+        self.wfile.flush()
+
+    def _sse_headers(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Transfer-Encoding", "chunked")
+        self._cors()
+        self.send_header("Mcp-Session-Id", SESSION_ID)
+        self.end_headers()
+
     def do_OPTIONS(self):
         self.send_response(204)
         self._cors()
         self.send_header("Content-Length", "0")
         self.end_headers()
 
+    def do_DELETE(self):
+        path = urllib.parse.urlparse(self.path).path.rstrip("/") or "/"
+        if path.startswith("/mcp"):
+            self.send_response(204)
+            self.send_header("Content-Length", "0")
+            self._cors()
+            self.end_headers()
+            return
+        self._json({"error": "not found", "path": path}, 404)
+
     def do_GET(self):
         path = urllib.parse.urlparse(self.path).path.rstrip("/") or "/"
 
         if path in ("/", "/health"):
-            self._json({"ok": True, "service": "toy-lite", "ts": int(time.time() * 1000)})
+            self._json({"ok": True, "service": "toy-lite", "version": "2.0.0",
+                        "ts": int(time.time() * 1000)})
             return
 
         if path == "/state":
@@ -354,34 +403,58 @@ class Handler(BaseHTTPRequestHandler):
                 self._html("<h1>relay.html 找不到</h1><p>%s</p>" % e, 500)
             return
 
-        if path == "/stream":
-            self.send_response(200)
-            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
-            self.send_header("Cache-Control", "no-cache")
-            self.send_header("Connection", "keep-alive")
-            self.send_header("X-Accel-Buffering", "no")
-            self._cors()
-            self.end_headers()
-            q = queue.Queue(maxsize=200)
-            with _lock:
-                _subs.append(q)
+        # MCP 的 GET 流 (部分客户端会连上来等 server->client 通知)
+        if path.startswith("/mcp"):
+            self._sse_headers()
             try:
-                self.wfile.write(("data: %s\n\n" % json.dumps(read_state(), ensure_ascii=False)).encode("utf-8"))
-                self.wfile.flush()
+                self._chunk(": connected\n\n")
+                q = queue.Queue(maxsize=200)
+                with _lock:
+                    _subs.append(q)
                 while True:
                     try:
                         st = q.get(timeout=15)
                         data = "data: %s\n\n" % json.dumps(st, ensure_ascii=False)
                     except queue.Empty:
                         data = ": ping\n\n"
-                    self.wfile.write(data.encode("utf-8"))
-                    self.wfile.flush()
+                    self._chunk(data)
             except Exception:
                 pass
             finally:
                 with _lock:
                     if q in _subs:
                         _subs.remove(q)
+                try:
+                    self.wfile.write(b"0\r\n\r\n")
+                except Exception:
+                    pass
+            return
+
+        # 玩具状态 SSE
+        if path == "/stream":
+            self._sse_headers()
+            q = queue.Queue(maxsize=200)
+            with _lock:
+                _subs.append(q)
+            try:
+                self._chunk("data: %s\n\n" % json.dumps(read_state(), ensure_ascii=False))
+                while True:
+                    try:
+                        st = q.get(timeout=15)
+                        data = "data: %s\n\n" % json.dumps(st, ensure_ascii=False)
+                    except queue.Empty:
+                        data = ": ping\n\n"
+                    self._chunk(data)
+            except Exception:
+                pass
+            finally:
+                with _lock:
+                    if q in _subs:
+                        _subs.remove(q)
+                try:
+                    self.wfile.write(b"0\r\n\r\n")
+                except Exception:
+                    pass
             return
 
         self._json({"error": "not found", "path": path}, 404)
@@ -398,21 +471,38 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 req = json.loads(raw.decode("utf-8"))
             except Exception as e:
-                self._json({"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "Parse error: %s" % e}}, 400)
+                self._json({"jsonrpc": "2.0", "id": None,
+                            "error": {"code": -32700, "message": "Parse error: %s" % e}}, 400)
                 return
-            try:
-                resp = handle_mcp(req)
-            except Exception as e:
-                resp = {"jsonrpc": "2.0", "id": req.get("id"),
-                        "error": {"code": -32603, "message": "Internal error: %s" % e}}
+
+            if isinstance(req, list):
+                resp = handle_mcp_batch(req)
+            else:
+                try:
+                    resp = handle_mcp(req)
+                except Exception as e:
+                    resp = {"jsonrpc": "2.0", "id": req.get("id"),
+                            "error": {"code": -32603, "message": "Internal error: %s" % e}}
+
             if resp is None:
+                # 通知: 202 Accepted, 空 body
                 self.send_response(202)
                 self.send_header("Content-Length", "0")
                 self._cors()
-                self.send_header("Mcp-Session-Id", "toy-lite-" + secrets.token_hex(8))
+                self.send_header("Mcp-Session-Id", SESSION_ID)
                 self.end_headers()
+                return
+
+            # 内容协商: 客户端只接受 SSE 时用 SSE 包装
+            accept = (self.headers.get("Accept") or "").lower()
+            want_sse = ("text/event-stream" in accept and "application/json" not in accept)
+            if want_sse:
+                self._sse_headers()
+                self._chunk("event: message\ndata: %s\n\n" % json.dumps(resp, ensure_ascii=False))
+                self.wfile.write(b"0\r\n\r\n")
+                self.wfile.flush()
             else:
-                self._json(resp, extra={"Mcp-Session-Id": "toy-lite-" + secrets.token_hex(8)})
+                self._json(resp)
             return
 
         if path.startswith("/toy/"):
@@ -447,9 +537,10 @@ def main():
     srv = ThreadingHTTPServer((HOST, PORT), Handler)
     srv.daemon_threads = True
     print("=" * 46)
-    print("  Toy Lite · 零依赖玩具中继 + MCP")
+    print("  Toy Lite v2 · 零依赖玩具中继 + MCP")
     print("  控制页: http://%s:%d/relay/" % (HOST, PORT))
     print("  MCP   : http://%s:%d/mcp/" % (HOST, PORT))
+    print("  Session: %s" % SESSION_ID)
     print("  按 Ctrl+C 停止")
     print("=" * 46)
     try:
