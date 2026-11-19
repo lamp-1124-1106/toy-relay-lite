@@ -1,26 +1,28 @@
 """
-toy_lite.py — 零依赖玩具中继 + MCP 服务 (v2)
+toy_lite.py — 零依赖玩具中继 + MCP 服务 (v3)
 只用 Python 标准库, 不需要 fastapi / uvicorn / mcp / pydantic。
 手机 (Pydroid 3) 上可直接跑。
 
   python toy_lite.py            # 监听 127.0.0.1:8765
   PORT=9000 python toy_lite.py # 换端口
 
-提供:
-  GET  /                 健康信息
-  GET  /health           存活探针
-  GET  /relay/           中继控制页 (Web Bluetooth)
-  GET  /stream           SSE 状态推送 (chunked)
-  GET  /state            当前状态
-  POST /mcp/             MCP Streamable HTTP 端点
-  GET  /mcp/             MCP SSE 流 (server -> client)
-  DELETE /mcp/           结束 MCP 会话
-  POST /toy/<motor>      HTTP 控制端点 (suction/vibration/electric/stop)
+v3 相比 v2 的修复 (都是实战踩出来的):
+  1. 监听队列 request_queue_size 5 -> 256
+     默认值太小, 队列一满内核直接丢 SYN, 客户端表现为
+     "connect timeout" (而不是 connection refused) —— Android 上特别难查。
+  2. /mcp/ 的 GET 流只发 keepalive 注释, 绝不混入玩具状态 JSON
+     v2 把 {"cmd":"set"} 当 JSON-RPC 推给客户端, 会污染协议流。
+  3. HTTP/1.1 keep-alive 连接加 idle timeout (60s), 防止线程堆积。
+  4. 每个 initialize 生成独立 session id, 正确回传 Mcp-Session-Id。
+  5. 回显 MCP-Protocol-Version 头。
+  6. 补齐 resources/list / prompts/list / logging/setLevel 等客户端必调的接口。
+  7. socket 开 TCP keepalive + TCP_NODELAY。
 """
 import json
 import os
 import queue
 import secrets
+import socket
 import threading
 import time
 import urllib.parse
@@ -34,13 +36,12 @@ STATE_PATH = os.path.join(ROOT, "state", "state.json")
 MOTORS = ("suction", "vibration", "electric")
 MOTOR_CN = {"suction": "吮吸", "vibration": "震动", "electric": "电流"}
 
-# MCP 协议版本: 客户端要哪个我们回哪个 (Kotlin SDK 常要 2025-06-18 / 2025-03-26)
-SUPPORTED_PROTOOLS = ("2025-06-18", "2025-03-26", "2024-11-05")
-
-SESSION_ID = "toy-lite-" + secrets.token_hex(8)
+SUPPORTED_PROTOLS = ("2025-06-18", "2025-03-26", "2024-11-05")
 
 _lock = threading.Lock()
-_subs = []  # SSE 订阅者队列列表
+_subs = []       # 玩具状态 SSE 订阅者
+_sessions = {}   # session_id -> {"created": ts}
+SSE_IDLE = 20.0  # SSE 心跳间隔 (秒)
 
 
 # ---------------- 状态 ----------------
@@ -81,7 +82,7 @@ def write_state(st):
             json.dump(st, f, ensure_ascii=False, indent=2)
         os.replace(tmp, STATE_PATH)
     except Exception as e:
-        print("[warn] 写 state 失败:", e)
+        print("[warn] 写 state 失败:", e, flush=True)
     broadcast(st)
     return st
 
@@ -141,9 +142,7 @@ TOOLS = [
         "description": "控制玩具的吮吸马达 (吸力)。intensity 0-100, 0=停止该马达, 100=最大。",
         "inputSchema": {
             "type": "object",
-            "properties": {
-                "intensity": {"type": "integer", "minimum": 0, "maximum": 100}
-            },
+            "properties": {"intensity": {"type": "integer", "minimum": 0, "maximum": 100}},
             "required": ["intensity"],
         },
     },
@@ -152,9 +151,7 @@ TOOLS = [
         "description": "控制玩具的震动马达。intensity 0-100, 0=停止该马达, 100=最大。",
         "inputSchema": {
             "type": "object",
-            "properties": {
-                "intensity": {"type": "integer", "minimum": 0, "maximum": 100}
-            },
+            "properties": {"intensity": {"type": "integer", "minimum": 0, "maximum": 100}},
             "required": ["intensity"],
         },
     },
@@ -163,15 +160,13 @@ TOOLS = [
         "description": "控制玩具的电流刺激马达。intensity 0-100, 0=停止该马达, 100=最大。",
         "inputSchema": {
             "type": "object",
-            "properties": {
-                "intensity": {"type": "integer", "minimum": 0, "maximum": 100}
-            },
+            "properties": {"intensity": {"type": "integer", "minimum": 0, "maximum": 100}},
             "required": ["intensity"],
         },
     },
     {
         "name": "toy_pattern",
-        "description": "播放一段节奏 (波形)。type: wave(波浪) / pulse(脉冲) / climb(攀升) / constant(恒定)。high/low 为强度上下限 0-100, duration 为持续秒数。",
+        "description": "播放一段节奏 (波形)。type: wave(正弦) / pulse(方波) / climb(渐强渐弱) / constant(恒定)。high/low 为强度上下限 0-100, duration 为持续秒数。",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -241,10 +236,11 @@ def call_tool(name, args):
         lines.append("   强度: %s%%" % st.get("intensity"))
         if pats:
             for m, p in pats.items():
-                lines.append("   节奏: %s = %s (%d-%d, %ds)" % (m, p.get("type"), p.get("low"), p.get("high"), p.get("duration")))
+                lines.append("   节奏: %s = %s (%d-%d, %ds)" % (
+                    m, p.get("type"), p.get("low"), p.get("high"), p.get("duration")))
         return "\n".join(lines)
     if name == "toy_history":
-        limit = int(args.get("limit", 5))
+        limit = max(1, min(20, int(args.get("limit", 5))))
         hist = (read_state().get("history") or [])[-limit:]
         if not hist:
             return "暂无历史"
@@ -259,33 +255,41 @@ def call_tool(name, args):
     raise ValueError("未知工具: " + str(name))
 
 
-def handle_mcp(req):
-    """req: 已解析的 JSON-RPC 字典 -> 响应 dict 或 None (通知)"""
+def new_session():
+    sid = "toy-lite-" + secrets.token_hex(8)
+    with _lock:
+        _sessions[sid] = {"created": time.time()}
+    return sid
+
+
+def handle_mcp(req, sid):
+    """req: 已解析的 JSON-RPC 字典 -> (响应 dict 或 None, 新 session id 或 None)"""
     method = req.get("method", "")
     rid = req.get("id")
     params = req.get("params") or {}
 
     if method == "initialize":
         want = params.get("protocolVersion")
-        ver = want if want in SUPPORTED_PROTOOLS else SUPPORTED_PROTOOLS[0]
+        ver = want if want in SUPPORTED_PROTOLS else SUPPORTED_PROTOLS[0]
+        new_sid = new_session()
         return {
             "jsonrpc": "2.0",
             "id": rid,
             "result": {
                 "protocolVersion": ver,
                 "capabilities": {"tools": {"listChanged": False}},
-                "serverInfo": {"name": "toy-lite", "version": "2.0.0"},
+                "serverInfo": {"name": "toy-lite", "version": "3.0.0"},
             },
-        }
+        }, new_sid
 
     if method in ("notifications/initialized", "initialized"):
-        return None  # 通知, 不回复
+        return None, None
 
     if method == "ping":
-        return {"jsonrpc": "2.0", "id": rid, "result": {}}
+        return {"jsonrpc": "2.0", "id": rid, "result": {}}, None
 
     if method == "tools/list":
-        return {"jsonrpc": "2.0", "id": rid, "result": {"tools": TOOLS}}
+        return {"jsonrpc": "2.0", "id": rid, "result": {"tools": TOOLS}}, None
 
     if method == "tools/call":
         name = params.get("name", "")
@@ -295,30 +299,50 @@ def handle_mcp(req):
             result = {"content": [{"type": "text", "text": text}], "isError": False}
         except Exception as e:
             result = {"content": [{"type": "text", "text": "❌ %s" % e}], "isError": True}
-        return {"jsonrpc": "2.0", "id": rid, "result": result}
+        return {"jsonrpc": "2.0", "id": rid, "result": result}, None
+
+    # 以下是一些客户端会顺手调的接口, 返回空结果而不是 "method not found"
+    if method == "resources/list":
+        return {"jsonrpc": "2.0", "id": rid, "result": {"resources": []}}, None
+    if method == "resources/templates/list":
+        return {"jsonrpc": "2.0", "id": rid, "result": {"resourceTemplates": []}}, None
+    if method == "prompts/list":
+        return {"jsonrpc": "2.0", "id": rid, "result": {"prompts": []}}, None
+    if method == "logging/setLevel":
+        return {"jsonrpc": "2.0", "id": rid, "result": {}}, None
+    if method == "completion/complete":
+        return {"jsonrpc": "2.0", "id": rid, "result": {"completion": {"values": [], "hasMore": False}}}, None
+    if method in ("notifications/cancelled", "notifications/progress", "notifications/roots/list_changed"):
+        return None, None
 
     if rid is None:
-        return None
-    return {"jsonrpc": "2.0", "id": rid, "error": {"code": -32601, "message": "Method not found: " + str(method)}}
+        return None, None
+    return {"jsonrpc": "2.0", "id": rid,
+            "error": {"code": -32601, "message": "Method not found: " + str(method)}}, None
 
 
-def handle_mcp_batch(reqs):
+def handle_mcp_batch(reqs, sid):
     out = []
+    new_sid = None
     for r in reqs:
         try:
-            resp = handle_mcp(r)
+            resp, s = handle_mcp(r, sid)
+            if s:
+                new_sid = s
         except Exception as e:
             resp = {"jsonrpc": "2.0", "id": r.get("id"),
                     "error": {"code": -32603, "message": "Internal error: %s" % e}}
         if resp is not None:
             out.append(resp)
-    return out or None
+    return (out or None), new_sid
 
 
 # ---------------- HTTP ----------------
 class Handler(BaseHTTPRequestHandler):
-    server_version = "ToyLite/2.0"
+    server_version = "ToyLite/3.0"
     protocol_version = "HTTP/1.1"
+    timeout = 60          # keep-alive 空闲连接 60s 后回收, 防止线程堆积
+    disable_nagle_algorithm = True
 
     def log_message(self, fmt, *a):
         pass
@@ -329,13 +353,21 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
         self.send_header("Access-Control-Expose-Headers", "Mcp-Session-Id, Mcp-Protocol-Version")
 
-    def _json(self, obj, code=200, extra=None):
+    def _proto_version(self):
+        v = self.headers.get("MCP-Protocol-Version")
+        return v if v in SUPPORTED_PROTOLS else None
+
+    def _json(self, obj, code=200, extra=None, sid=None):
         body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self._cors()
-        self.send_header("Mcp-Session-Id", SESSION_ID)
+        if sid:
+            self.send_header("Mcp-Session-Id", sid)
+        pv = self._proto_version()
+        if pv:
+            self.send_header("MCP-Protocol-Version", pv)
         for k, v in (extra or {}).items():
             self.send_header(k, v)
         self.end_headers()
@@ -352,19 +384,26 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _chunk(self, text):
-        """写一个 HTTP/1.1 chunk"""
         data = text.encode("utf-8")
         self.wfile.write(b"%X\r\n" % len(data) + data + b"\r\n")
         self.wfile.flush()
 
-    def _sse_headers(self):
+    def _sse_headers(self, sid=None):
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Transfer-Encoding", "chunked")
         self._cors()
-        self.send_header("Mcp-Session-Id", SESSION_ID)
+        if sid:
+            self.send_header("Mcp-Session-Id", sid)
         self.end_headers()
+
+    def _end_chunk(self):
+        try:
+            self.wfile.write(b"0\r\n\r\n")
+            self.wfile.flush()
+        except Exception:
+            pass
 
     def do_OPTIONS(self):
         self.send_response(204)
@@ -375,6 +414,10 @@ class Handler(BaseHTTPRequestHandler):
     def do_DELETE(self):
         path = urllib.parse.urlparse(self.path).path.rstrip("/") or "/"
         if path.startswith("/mcp"):
+            sid = self.headers.get("Mcp-Session-Id")
+            if sid:
+                with _lock:
+                    _sessions.pop(sid, None)
             self.send_response(204)
             self.send_header("Content-Length", "0")
             self._cors()
@@ -386,7 +429,7 @@ class Handler(BaseHTTPRequestHandler):
         path = urllib.parse.urlparse(self.path).path.rstrip("/") or "/"
 
         if path in ("/", "/health"):
-            self._json({"ok": True, "service": "toy-lite", "version": "2.0.0",
+            self._json({"ok": True, "service": "toy-lite", "version": "3.0.0",
                         "ts": int(time.time() * 1000)})
             return
 
@@ -403,34 +446,23 @@ class Handler(BaseHTTPRequestHandler):
                 self._html("<h1>relay.html 找不到</h1><p>%s</p>" % e, 500)
             return
 
-        # MCP 的 GET 流 (部分客户端会连上来等 server->client 通知)
+        # --- MCP 的 GET 流 ---
+        # 只发 keepalive 注释, 绝不混入玩具状态 JSON (v2 的 bug)
         if path.startswith("/mcp"):
-            self._sse_headers()
+            sid = self.headers.get("Mcp-Session-Id")
+            self._sse_headers(sid)
             try:
                 self._chunk(": connected\n\n")
-                q = queue.Queue(maxsize=200)
-                with _lock:
-                    _subs.append(q)
                 while True:
-                    try:
-                        st = q.get(timeout=15)
-                        data = "data: %s\n\n" % json.dumps(st, ensure_ascii=False)
-                    except queue.Empty:
-                        data = ": ping\n\n"
-                    self._chunk(data)
+                    self._chunk(": ping\n\n")
+                    time.sleep(SSE_IDLE)
             except Exception:
                 pass
             finally:
-                with _lock:
-                    if q in _subs:
-                        _subs.remove(q)
-                try:
-                    self.wfile.write(b"0\r\n\r\n")
-                except Exception:
-                    pass
+                self._end_chunk()
             return
 
-        # 玩具状态 SSE
+        # --- 玩具状态 SSE ---
         if path == "/stream":
             self._sse_headers()
             q = queue.Queue(maxsize=200)
@@ -440,7 +472,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._chunk("data: %s\n\n" % json.dumps(read_state(), ensure_ascii=False))
                 while True:
                     try:
-                        st = q.get(timeout=15)
+                        st = q.get(timeout=SSE_IDLE)
                         data = "data: %s\n\n" % json.dumps(st, ensure_ascii=False)
                     except queue.Empty:
                         data = ": ping\n\n"
@@ -451,10 +483,7 @@ class Handler(BaseHTTPRequestHandler):
                 with _lock:
                     if q in _subs:
                         _subs.remove(q)
-                try:
-                    self.wfile.write(b"0\r\n\r\n")
-                except Exception:
-                    pass
+                self._end_chunk()
             return
 
         self._json({"error": "not found", "path": path}, 404)
@@ -468,41 +497,43 @@ class Handler(BaseHTTPRequestHandler):
         raw = self.rfile.read(n) if n else b""
 
         if path.startswith("/mcp"):
+            sid = self.headers.get("Mcp-Session-Id")
             try:
                 req = json.loads(raw.decode("utf-8"))
             except Exception as e:
                 self._json({"jsonrpc": "2.0", "id": None,
-                            "error": {"code": -32700, "message": "Parse error: %s" % e}}, 400)
+                            "error": {"code": -32700, "message": "Parse error: %s" % e}}, 400, sid=sid)
                 return
 
             if isinstance(req, list):
-                resp = handle_mcp_batch(req)
+                resp, new_sid = handle_mcp_batch(req, sid)
             else:
                 try:
-                    resp = handle_mcp(req)
+                    resp, new_sid = handle_mcp(req, sid)
                 except Exception as e:
                     resp = {"jsonrpc": "2.0", "id": req.get("id"),
                             "error": {"code": -32603, "message": "Internal error: %s" % e}}
+                    new_sid = None
+
+            out_sid = new_sid or sid
 
             if resp is None:
-                # 通知: 202 Accepted, 空 body
                 self.send_response(202)
                 self.send_header("Content-Length", "0")
                 self._cors()
-                self.send_header("Mcp-Session-Id", SESSION_ID)
+                if out_sid:
+                    self.send_header("Mcp-Session-Id", out_sid)
                 self.end_headers()
                 return
 
-            # 内容协商: 客户端只接受 SSE 时用 SSE 包装
             accept = (self.headers.get("Accept") or "").lower()
             want_sse = ("text/event-stream" in accept and "application/json" not in accept)
             if want_sse:
-                self._sse_headers()
+                self._sse_headers(out_sid)
                 self._chunk("event: message\ndata: %s\n\n" % json.dumps(resp, ensure_ascii=False))
-                self.wfile.write(b"0\r\n\r\n")
-                self.wfile.flush()
+                self._end_chunk()
             else:
-                self._json(resp)
+                self._json(resp, sid=out_sid)
             return
 
         if path.startswith("/toy/"):
@@ -530,23 +561,39 @@ class Handler(BaseHTTPRequestHandler):
         self._json({"error": "not found", "path": path}, 404)
 
 
+class Server(ThreadingHTTPServer):
+    daemon_threads = True
+    block_on_close = False
+    allow_reuse_address = True
+    # 关键: 默认只有 5, 队列一满内核直接丢 SYN -> connect timeout
+    request_queue_size = 256
+
+    def get_request(self):
+        sock, addr = self.socket.accept()
+        try:
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        except Exception:
+            pass
+        return sock, addr
+
+
 def main():
     os.makedirs(os.path.dirname(STATE_PATH), exist_ok=True)
     if not os.path.exists(STATE_PATH):
         write_state(default_state())
-    srv = ThreadingHTTPServer((HOST, PORT), Handler)
-    srv.daemon_threads = True
-    print("=" * 46)
-    print("  Toy Lite v2 · 零依赖玩具中继 + MCP")
-    print("  控制页: http://%s:%d/relay/" % (HOST, PORT))
-    print("  MCP   : http://%s:%d/mcp/" % (HOST, PORT))
-    print("  Session: %s" % SESSION_ID)
-    print("  按 Ctrl+C 停止")
-    print("=" * 46)
+    srv = Server((HOST, PORT), Handler)
+    print("=" * 46, flush=True)
+    print("  Toy Lite v3 · 零依赖玩具中继 + MCP", flush=True)
+    print("  控制页: http://%s:%d/relay/" % (HOST, PORT), flush=True)
+    print("  MCP   : http://%s:%d/mcp/" % (HOST, PORT), flush=True)
+    print("  队列  : %d   keepalive超时: %ds" % (srv.request_queue_size, Handler.timeout), flush=True)
+    print("  按 Ctrl+C 停止", flush=True)
+    print("=" * 46, flush=True)
     try:
-        srv.serve_forever()
+        srv.serve_forever(poll_interval=0.2)
     except KeyboardInterrupt:
-        print("\n已停止")
+        print("\n已停止", flush=True)
 
 
 if __name__ == "__main__":
