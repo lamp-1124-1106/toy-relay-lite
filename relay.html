@@ -1,0 +1,408 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+<meta name="theme-color" content="#f5e8ff" />
+<title>Toy Lite · 玩具控制台</title>
+<style>
+  :root{
+    --text:#3a3344; --soft:#6e6478; --muted:#a098b0;
+    --violet:#b89ce0; --pink:#e0a0c8; --blue:#98c0e8;
+    --ok:#88c898; --warn:#e8c878; --danger:#e89090;
+    --glass-bg:linear-gradient(135deg,rgba(255,255,255,.16) 0%,rgba(255,255,255,.04) 38%,rgba(255,255,255,.02) 62%,rgba(255,255,255,.10) 100%),rgba(255,255,255,.06);
+    --glass-edge:linear-gradient(135deg,rgba(255,255,255,.65) 0%,rgba(255,255,255,.15) 25%,rgba(255,255,255,.05) 50%,rgba(255,255,255,.20) 75%,rgba(255,255,255,.5) 100%);
+    --glass-shadow:0 30px 60px -20px rgba(70,50,90,.22),0 12px 24px -10px rgba(70,50,90,.18),inset 0 1px 1px rgba(255,255,255,.55),inset 0 -1px 1px rgba(255,255,255,.08);
+    --filter:blur(40px) saturate(180%) brightness(110%);
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",Roboto,sans-serif;color:var(--text);-webkit-font-smoothing:antialiased;min-height:100vh}
+  body{
+    background:linear-gradient(180deg,rgba(255,220,235,.25) 0%,rgba(220,200,245,.35) 100%),#efe4f7;
+    background-attachment:fixed;overflow-x:hidden;min-height:100vh;
+  }
+  body::before{content:"";position:fixed;width:520px;height:520px;border-radius:50%;filter:blur(120px);z-index:0;pointer-events:none;background:radial-gradient(circle,rgba(255,180,210,.65) 0%,transparent 65%);top:-140px;left:-150px}
+  body::after{content:"";position:fixed;width:460px;height:460px;border-radius:50%;filter:blur(120px);z-index:0;pointer-events:none;background:radial-gradient(circle,rgba(180,200,255,.55) 0%,transparent 65%);bottom:-170px;right:-130px}
+  .container{max-width:680px;margin:0 auto;padding:20px 16px 60px;position:relative;z-index:1}
+  header{text-align:center;padding:28px 0 20px}
+  h1{font-size:21px;font-weight:600;margin:0 0 4px;letter-spacing:.5px}
+  .subtitle{font-size:12px;color:var(--soft);margin:0}
+  .glass{background:var(--glass-bg);backdrop-filter:var(--filter);-webkit-backdrop-filter:var(--filter);border-radius:22px;border:1px solid transparent;box-shadow:var(--glass-shadow);padding:18px;margin-bottom:16px;position:relative;overflow:hidden;isolation:isolate}
+  .glass::before{content:"";position:absolute;inset:0;border-radius:inherit;padding:1px;background:var(--glass-edge);-webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);-webkit-mask-composite:xor;mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);mask-composite:exclude;pointer-events:none;z-index:2}
+  .glass>*{position:relative;z-index:3}
+  .glass h2{font-size:13px;font-weight:600;color:var(--soft);margin:0 0 12px;letter-spacing:.3px;display:flex;align-items:center;gap:8px}
+  .glass h2::before{content:"";display:inline-block;width:4px;height:14px;background:linear-gradient(180deg,var(--violet),var(--pink));border-radius:2px;box-shadow:0 0 6px rgba(220,190,230,.5)}
+  label{font-size:12px;color:var(--soft);display:block;margin:10px 0 6px;font-weight:500}
+  select,input[type=text],input[type=number]{width:100%;background:linear-gradient(180deg,rgba(255,255,255,.10),rgba(255,255,255,.04));color:var(--text);border:1px solid rgba(255,255,255,.22);border-radius:12px;padding:10px 14px;font-size:14px;font-family:inherit;outline:none;box-shadow:inset 0 1px 2px rgba(40,30,60,.10),inset 0 -1px 1px rgba(255,255,255,.25);appearance:none}
+  select:focus,input:focus{background:linear-gradient(180deg,rgba(255,255,255,.22),rgba(255,255,255,.10));border-color:rgba(220,190,230,.6)}
+  .row{display:flex;gap:10px;align-items:stretch;margin-top:10px}
+  .row>*{flex:1;min-width:0}
+  button{background:linear-gradient(180deg,rgba(255,255,255,.30),rgba(255,255,255,.10) 45%,transparent),linear-gradient(135deg,var(--violet) 0%,var(--pink) 100%);color:#fff;border:1px solid rgba(255,255,255,.35);border-radius:14px;padding:12px 16px;font-size:14px;font-weight:600;font-family:inherit;cursor:pointer;min-height:46px;letter-spacing:.3px;box-shadow:0 6px 16px -4px rgba(180,140,200,.40),inset 0 1px 1px rgba(255,255,255,.5);text-shadow:0 1px 1px rgba(80,50,100,.25)}
+  button:active:not(:disabled){transform:translateY(1px);filter:brightness(.97)}
+  button:disabled{background:linear-gradient(135deg,rgba(180,170,195,.25),rgba(200,190,210,.25));color:rgba(80,70,95,.55);cursor:not-allowed;box-shadow:inset 0 1px 1px rgba(255,255,255,.2);text-shadow:none}
+  button.glass-btn{background:linear-gradient(180deg,rgba(255,255,255,.22),rgba(255,255,255,.08) 50%,rgba(255,255,255,.04)),rgba(255,255,255,.08);color:var(--text);text-shadow:0 1px 1px rgba(255,255,255,.5);box-shadow:0 4px 12px -4px rgba(120,90,140,.18),inset 0 1px 1px rgba(255,255,255,.55)}
+  button.danger{background:linear-gradient(180deg,rgba(255,255,255,.30),rgba(255,255,255,.10) 45%,transparent),linear-gradient(135deg,var(--danger) 0%,var(--pink) 100%)}
+  button.ok{background:linear-gradient(180deg,rgba(255,255,255,.30),rgba(255,255,255,.10) 45%,transparent),linear-gradient(135deg,var(--ok) 0%,var(--blue) 100%)}
+  .status-box{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:11.5px;padding:12px 14px;background:linear-gradient(180deg,rgba(255,255,255,.04),rgba(255,255,255,.10));border-radius:14px;border:1px solid rgba(255,255,255,.18);max-height:220px;overflow-y:auto;white-space:pre-wrap;word-break:break-all;line-height:1.55;box-shadow:inset 0 2px 4px rgba(40,30,60,.12),inset 0 -1px 1px rgba(255,255,255,.18)}
+  .pill{display:inline-flex;align-items:center;gap:5px;padding:3px 10px;border-radius:10px;font-size:11px;font-weight:500;background:rgba(180,140,200,.15);color:var(--soft);border:1px solid rgba(255,255,255,.3)}
+  .pill::before{content:"";display:inline-block;width:6px;height:6px;border-radius:50%;background:currentColor;opacity:.7}
+  .pill.connected{background:rgba(136,200,152,.22);color:#4a7a5a}
+  .pill.stopped{background:rgba(180,170,195,.18);color:var(--muted)}
+  .pill.real{background:rgba(184,156,224,.22);color:#6a4a98}
+  .ble-status{font-size:12px;color:var(--soft);margin-top:8px}
+  .preset-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:4px}
+  .preset-card{background:linear-gradient(180deg,rgba(255,255,255,.22),rgba(255,255,255,.06) 50%,rgba(255,255,255,.03)),rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.35);border-radius:16px;padding:14px 8px;text-align:center;cursor:pointer;font-family:inherit;font-size:13px;font-weight:500;color:var(--text);box-shadow:0 4px 14px -4px rgba(140,110,170,.18),inset 0 1px 1px rgba(255,255,255,.55)}
+  .preset-card:not(:disabled):hover{transform:translateY(-2px)}
+  .preset-card:disabled{opacity:.45;cursor:not-allowed}
+  .preset-card .emoji{font-size:22px;display:block;margin-bottom:4px}
+  .preset-stop{grid-column:1/-1}
+  .hint{font-size:11px;color:var(--muted);margin-top:8px;line-height:1.5}
+  .banner{font-size:12px;color:var(--soft);text-align:center;padding:10px 14px}
+</style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <h1>🌸 Toy Lite <span id="mode-pill" class="pill stopped">未连接</span></h1>
+    <p class="subtitle">零依赖本地中继 · Web Bluetooth 直连玩具</p>
+  </header>
+
+  <div class="glass banner" id="local-banner">📱 <strong>手机本地模式</strong> · 单设备直连，无需 VPS / 域名 / API Key</div>
+
+  <!-- 1. 连接 -->
+  <div class="glass">
+    <h2>连接</h2>
+    <div class="row">
+      <div>
+        <label>模式</label>
+        <select id="mode-select">
+          <option value="real">Real (真实 BLE)</option>
+          <option value="mock">Mock (模拟)</option>
+        </select>
+      </div>
+      <div>
+        <label>设备广播名</label>
+        <input type="text" id="device-name" value="SOSEXY" />
+      </div>
+    </div>
+    <label>Service UUID</label>
+    <input type="text" id="service-uuid" value="0000ee01-0000-1000-8000-00805f9b34fb" />
+    <label>Write Characteristic UUID</label>
+    <input type="text" id="write-uuid" value="0000ee03-0000-1000-8000-00805f9b34fb" />
+    <div class="row" style="margin-top:14px">
+      <button class="ok" id="btn-start">▶ 启动中继</button>
+      <button class="danger glass-btn" id="btn-stop" disabled>⏹ 停止</button>
+    </div>
+  </div>
+
+  <!-- 2. BLE -->
+  <div class="glass">
+    <h2>BLE 连接</h2>
+    <div class="row">
+      <button class="glass-btn" id="btn-connect" disabled>🔗 连接 BLE</button>
+      <button class="glass-btn" id="btn-disconnect" disabled>断开</button>
+    </div>
+    <div class="ble-status" id="ble-status">未连接</div>
+    <div class="hint">设备名填 <b>SOSEXY</b>（或 <b>SOSEXY Pro</b> / <b>Bubblebei</b>）。官方 App 必须先断开蓝牙——BLE 同一时间只能被一个客户端连。</div>
+  </div>
+
+  <!-- 3. 预设 -->
+  <div class="glass">
+    <h2>预设模式</h2>
+    <div class="preset-grid">
+      <button class="preset-card" id="btn-preset-gentle" disabled><span class="emoji">🍃</span>轻柔</button>
+      <button class="preset-card" id="btn-preset-medium" disabled><span class="emoji">🌊</span>中等</button>
+      <button class="preset-card" id="btn-preset-wild" disabled><span class="emoji">🔥</span>狂野</button>
+      <button class="preset-card preset-stop" id="btn-preset-stop" disabled>⏹ 全部停止</button>
+    </div>
+    <div class="hint" id="preset-hint">需连接 BLE 后启用</div>
+  </div>
+
+  <!-- 4. 状态 -->
+  <div class="glass">
+    <h2>实时状态</h2>
+    <div class="status-box" id="status-box">等待启动...</div>
+  </div>
+
+  <!-- 5. 日志 -->
+  <div class="glass">
+    <h2>命令日志</h2>
+    <div class="status-box" id="log-box"></div>
+  </div>
+
+  <p class="hint" style="text-align:center;margin-top:24px">Toy Lite · 零依赖 · 仅供成年人在自愿知情前提下使用</p>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const log = msg => { $("log-box").textContent = "[" + new Date().toLocaleTimeString() + "] " + msg + "\n" + $("log-box").textContent; };
+const setStatus = msg => $("status-box").textContent = msg;
+
+// ===== SOSEXY 协议 =====
+const MOTOR_MAP = { suction:[0x07,0x08], vibration:[0x01,0x02], electric:[0x03,0x04] };
+const SERVICE_UUIDS = [
+  "0000ee01-0000-1000-8000-00805f9b34fb",
+  "0000eee0-0000-1000-8000-00805f9b34fb",
+  "0000fef0-0000-1000-8000-00805f9b34fb",
+  "0000fff0-0000-1000-8000-00805f9b34fb",
+  "0000ffe0-0000-1000-8000-00805f9b34fb",
+  "0000fde0-0000-1000-8000-00805f9b34fb",
+  "0000aa00-0000-1000-8000-00805f9b34fb"
+];
+function buildFrame(motor, intensity){
+  const m = MOTOR_MAP[motor]; if(!m) return null;
+  return new Uint8Array([0x01,0x01,0x00,0x02,0x00, m[0],0x11, intensity & 0xFF, 0x00, m[1],0x11,0x01]);
+}
+
+// ===== BLE =====
+let bleDevice=null, writeChar=null;
+let lastFrame=null, keepAliveTimer=null, waveTimer=null;
+
+async function writeBytes(bytes){
+  if(!writeChar) throw new Error("没连接");
+  if(writeChar.properties && writeChar.properties.write){
+    try { await writeChar.writeValueWithResponse(bytes); }
+    catch(e){ await writeChar.writeValueWithoutResponse(bytes); }
+  } else {
+    await writeChar.writeValueWithoutResponse(bytes);
+  }
+}
+
+async function sendBLE(motor, intensity){
+  const frame = buildFrame(motor, intensity);
+  if(!frame) return;
+  lastFrame = frame;
+  await writeBytes(frame);
+  log("📡 BLE → " + motor + " " + intensity + "%  [" + Array.from(frame).map(b=>b.toString(16).padStart(2,"0")).join(" ") + "]");
+}
+
+async function stopAllBLE(){
+  for(const m of Object.keys(MOTOR_MAP)){ try{ await writeBytes(buildFrame(m,0)); }catch(e){} }
+  lastFrame = null;
+}
+
+// ===== 保活: 设备约 60 秒闲置会主动断连, 每 15 秒重发当前帧 =====
+function startKeepAlive(){
+  if(keepAliveTimer) return;
+  keepAliveTimer = setInterval(async () => {
+    if(!writeChar || !lastFrame) return;
+    try { await writeBytes(lastFrame); }
+    catch(e){ log("⚠️ 保活失败: " + e.message); }
+  }, 15000);
+}
+function stopKeepAlive(){ if(keepAliveTimer){ clearInterval(keepAliveTimer); keepAliveTimer=null; } }
+
+// ===== 波形引擎 (在本地生成曲线, 只传规格) =====
+function startWave(motor, spec){
+  stopWave();
+  const { type, high, low, duration } = spec;
+  const start = Date.now();
+  const step = 250;
+  waveTimer = setInterval(async () => {
+    const el = (Date.now() - start) / 1000;
+    if(el >= duration){ stopWave(); await sendBLE(motor, 0); log("⏱ 波形结束: " + motor); return; }
+    let v;
+    if(type === "wave") v = low + (high-low) * (0.5 - 0.5*Math.cos(2*Math.PI*(el/duration)));
+    else if(type === "pulse") v = (Math.floor(el/1.5) % 2 === 0) ? high : low;
+    else if(type === "climb"){ const p = el/duration; v = low + (high-low)*Math.sin(Math.PI*p); }
+    else v = high;
+    try { await sendBLE(motor, Math.round(v)); } catch(e){}
+  }, step);
+}
+function stopWave(){ if(waveTimer){ clearInterval(waveTimer); waveTimer=null; } }
+
+// ===== 连接 =====
+async function connectBLE(){
+  const name = $("device-name").value.trim();
+  const svcInput = $("service-uuid").value.trim();
+  const wuuid = $("write-uuid").value.trim();
+  if(!name){ log("❌ 请填设备名"); return; }
+
+  const user = svcInput ? svcInput.split(/[,\s;]+/).map(s=>s.trim()).filter(Boolean) : [];
+  const all = [...new Set([...user, ...SERVICE_UUIDS])];
+
+  try{
+    log("🔍 扫描 " + name + " ...");
+    const opts = { filters:[{namePrefix:name}], optionalServices: all };
+    bleDevice = await navigator.bluetooth.requestDevice(opts);
+    log("📡 找到 " + (bleDevice.name||name) + ", 连接中...");
+    const server = await bleDevice.gatt.connect();
+    bleDevice.addEventListener("gattserverdisconnected", () => {
+      log("🔌 BLE 被断开");
+      $("ble-status").innerHTML = '<span class="pill stopped">未连接</span>';
+      $("btn-disconnect").disabled = true;
+      $("btn-connect").disabled = false;
+      writeChar = null; lastFrame = null;
+      stopKeepAlive(); stopWave();
+    });
+
+    for(const s of all){
+      let svc;
+      try { svc = await server.getPrimaryService(s); } catch(e){ continue; }
+      try{
+        const chars = await svc.getCharacteristics();
+        for(const ch of chars){
+          const p = ch.properties || {};
+          if((p.write || p.writeWithoutResponse) && !writeChar){
+            if(wuuid && !ch.uuid.startsWith(wuuid.slice(0,8))) continue;
+            writeChar = ch;
+            log("✅ 写入特征: " + ch.uuid);
+          }
+        }
+      }catch(e){}
+    }
+    if(!writeChar) throw new Error("没找到可写 characteristic");
+
+    $("ble-status").innerHTML = '<span class="pill connected">已连接</span> ' + (bleDevice.name||name);
+    log("✅ BLE 已连接");
+    $("btn-disconnect").disabled = false;
+    $("btn-connect").disabled = true;
+    startKeepAlive();
+    await sendBLE("vibration", 0);
+    updatePresetButtons();
+  }catch(e){
+    log("❌ 连接失败: " + (e && e.message ? e.message : e));
+    $("ble-status").innerHTML = '<span class="pill stopped">失败</span>';
+  }
+}
+
+function disconnectBLE(){
+  try{ if(bleDevice && bleDevice.gatt.connected) bleDevice.gatt.disconnect(); }catch(e){}
+  bleDevice=null; writeChar=null; lastFrame=null;
+  stopKeepAlive(); stopWave();
+  $("ble-status").innerHTML = '<span class="pill stopped">未连接</span>';
+  $("btn-disconnect").disabled = true;
+  $("btn-connect").disabled = ($("mode-select").value !== "real");
+  log("🔌 BLE 已断开");
+  updatePresetButtons();
+}
+
+// ===== 预设 =====
+const PRESETS = {
+  gentle:{ suction:20, vibration:15, electric:0 },
+  medium:{ suction:50, vibration:40, electric:10 },
+  wild:  { suction:80, vibration:70, electric:30 }
+};
+function updatePresetButtons(){
+  const ok = !!writeChar && $("mode-select").value === "real";
+  ["btn-preset-gentle","btn-preset-medium","btn-preset-wild","btn-preset-stop"].forEach(id => $(id).disabled = !ok);
+  $("preset-hint").textContent = ok ? "✅ BLE 已连接, 可用预设" : (writeChar ? "切换到 Real 模式" : "需先连接 BLE");
+}
+async function runPreset(name){
+  const p = PRESETS[name]; if(!p) return;
+  log("🎯 预设: " + name);
+  for(const [m,v] of Object.entries(p)){ if(v>0 && writeChar){ try{ await sendBLE(m,v); }catch(e){ log("❌ "+m+" 失败: "+e.message); } } }
+}
+async function presetStop(){ log("🎯 预设: 全部停止"); stopWave(); await stopAllBLE(); }
+
+// ===== SSE + 轮询 =====
+let pollTimer=null, lastUpdatedAt=0, lastStopTs=0, eventSource=null;
+
+async function handleState(st){
+  setStatus(JSON.stringify(st, null, 2));
+  const mode = $("mode-select").value;
+
+  if(st.cmd === "stop" && st.updated_at > lastStopTs){
+    lastStopTs = st.updated_at;
+    log("⏹ 停止");
+    stopWave();
+    if(mode === "real" && writeChar){ try{ await stopAllBLE(); }catch(e){} }
+    lastUpdatedAt = st.updated_at;
+    return;
+  }
+
+  const pats = st.patterns || {};
+  if(st.updated_at > lastUpdatedAt && st.cmd === "set"){
+    lastUpdatedAt = st.updated_at;
+    const motor = st.motor, intensity = st.intensity;
+    const pat = pats[motor];
+    if(pat){
+      log("🎵 波形: " + motor + " " + pat.type + " " + pat.low + "-" + pat.high + " " + pat.duration + "s");
+      if(mode === "real" && writeChar){
+        try{ startWave(motor, pat); }catch(e){ log("❌ 波形失败: "+e.message); }
+      }
+    } else if(motor && intensity !== undefined){
+      log("📡 " + motor + " → " + intensity + "%");
+      if(mode === "real" && writeChar){ try{ await sendBLE(motor, intensity); }catch(e){ log("❌ 蓝牙写入失败: "+e.message); } }
+    }
+  }
+}
+
+async function pollOnce(){
+  try{
+    const res = await fetch("/state", {cache:"no-store"});
+    if(!res.ok) throw new Error("HTTP " + res.status);
+    await handleState(await res.json());
+  }catch(e){ log("❌ 拉取失败: " + e.message); }
+}
+
+function startSSE(){
+  if(eventSource){ eventSource.close(); eventSource=null; }
+  try{
+    eventSource = new EventSource("/stream");
+    eventSource.onmessage = async ev => { try{ await handleState(JSON.parse(ev.data)); }catch(e){} };
+    eventSource.onopen = () => log("🔌 SSE 已连接");
+    eventSource.onerror = () => log("⚠️ SSE 断开, 自动重连...");
+  }catch(e){ log("❌ SSE 创建失败: "+e.message); }
+}
+function stopSSE(){ if(eventSource){ eventSource.close(); eventSource=null; } }
+
+// ===== 启动 / 停止 =====
+function startRelay(){
+  const mode = $("mode-select").value;
+  lastUpdatedAt = 0; lastStopTs = 0;
+  $("mode-pill").textContent = mode === "mock" ? "Mock" : "Real";
+  $("mode-pill").className = "pill " + mode;
+  $("btn-start").disabled = true;
+  $("btn-stop").disabled = false;
+  $("btn-connect").disabled = (mode !== "real");
+  startSSE();
+  pollTimer = setInterval(pollOnce, 5000);
+  pollOnce();
+}
+function stopRelay(){
+  if(pollTimer) clearInterval(pollTimer);
+  stopSSE(); pollTimer=null;
+  $("mode-pill").textContent = "已停止";
+  $("mode-pill").className = "pill stopped";
+  $("btn-start").disabled = false;
+  $("btn-stop").disabled = true;
+  $("btn-connect").disabled = true;
+  log("⏹ 中继停止");
+}
+
+// ===== 绑定 =====
+$("btn-start").addEventListener("click", startRelay);
+$("btn-stop").addEventListener("click", stopRelay);
+$("btn-connect").addEventListener("click", connectBLE);
+$("btn-disconnect").addEventListener("click", disconnectBLE);
+$("mode-select").addEventListener("change", updatePresetButtons);
+$("btn-preset-gentle").addEventListener("click", () => runPreset("gentle"));
+$("btn-preset-medium").addEventListener("click", () => runPreset("medium"));
+$("btn-preset-wild").addEventListener("click", () => runPreset("wild"));
+$("btn-preset-stop").addEventListener("click", presetStop);
+
+// ===== 持久化 =====
+try{
+  const s = JSON.parse(localStorage.getItem("toy-lite-cfg")||"{}");
+  if(s.deviceName) $("device-name").value = s.deviceName;
+  if(s.serviceUuid) $("service-uuid").value = s.serviceUuid;
+  if(s.writeUuid) $("write-uuid").value = s.writeUuid;
+  if(s.mode) $("mode-select").value = s.mode;
+}catch(e){}
+function saveCfg(){
+  try{
+    localStorage.setItem("toy-lite-cfg", JSON.stringify({
+      deviceName:$("device-name").value,
+      serviceUuid:$("service-uuid").value,
+      writeUuid:$("write-uuid").value,
+      mode:$("mode-select").value
+    }));
+  }catch(e){}
+}
+["device-name","service-uuid","write-uuid","mode-select"].forEach(id => $(id).addEventListener("change", saveCfg));
+
+log("✨ 页面已加载");
+</script>
+</body>
+</html>
