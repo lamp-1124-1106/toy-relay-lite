@@ -98,6 +98,7 @@
       <button class="ok" id="btn-start">▶ 启动中继</button>
       <button class="danger glass-btn" id="btn-stop" disabled>⏹ 停止</button>
     </div>
+    <div class="hint" id="auto-hint"></div>
   </div>
 
   <!-- 2. BLE -->
@@ -122,8 +123,8 @@
       <div>
         <label>帧序号 (首字节)</label>
         <select id="seq-mode">
-          <option value="fixed">固定 0x01 (标准版)</option>
           <option value="random">随机 (Pro 版)</option>
+          <option value="fixed">固定 0x01 (标准版)</option>
         </select>
       </div>
       <div>
@@ -245,7 +246,7 @@ async function stopAllBLE(){
   lastFrame = null;
 }
 
-// ===== 保活: 设备约 60 秒闲置主动断连, 每 15 秒重发当前帧 =====
+// ===== BLE 保活: 设备约 60 秒闲置主动断连, 每 15 秒重发当前帧 =====
 function startKeepAlive(){
   if(keepAliveTimer) return;
   keepAliveTimer = setInterval(async () => {
@@ -296,7 +297,7 @@ async function runProbe(){
     probeIdx = i;
     renderProbeList();
     const [a,b] = PROBE_PAIRS[i];
-    log("🔬 探测组" + (i+1) + "/" + PROBE_PAIRS.length + " → 通道 " + a.toString(16) + "/" + b.toString(16) + " @30%");
+    log("🔬 探测组" + (i+1) + "/" + PROBE_PAIRS.length + " → 通道 " + a.toString(16) + "/" + b.toString(16) + "@30%");
     try { await sendFrame(buildFrame(a,b,30,seqByte()), "probe#" + (i+1)); } catch(e){ log("❌ 写入失败: " + e.message); }
     await new Promise(r => setTimeout(r, 5000));
   }
@@ -334,71 +335,80 @@ async function connectBLE(){
       optionalServices: all
     });
     log("📡 找到 " + (bleDevice.name||name) + ", 连接中...");
-    const server = await bleDevice.gatt.connect();
-    bleDevice.addEventListener("gattserverdisconnected", () => {
-      log("🔌 BLE 被断开");
-      $("ble-status").innerHTML = '<span class="pill stopped">未连接</span>';
-      $("btn-disconnect").disabled = true;
-      $("btn-connect").disabled = false;
-      writeChar = null; lastFrame = null;
-      stopKeepAlive(); stopWave(); stopProbe();
-    });
-
-    for(const s of all){
-      let svc;
-      try { svc = await server.getPrimaryService(s); } catch(e){ continue; }
-      try{
-        const chars = await svc.getCharacteristics();
-        for(const ch of chars){
-          const p = ch.properties || {};
-          if((p.write || p.writeWithoutResponse) && !writeChar){
-            if(wuuid && !ch.uuid.startsWith(wuuid.slice(0,8))) continue;
-            writeChar = ch;
-            log("✅ 写入特征: " + ch.uuid);
-          }
-          if(p.notify && !notifyChar && ch.uuid.startsWith(NOTIFY_UUID.slice(0,8))){
-            notifyChar = ch;
-          }
-        }
-      }catch(e){}
-    }
-    if(!writeChar) throw new Error("没找到可写 characteristic");
-
-    // 订阅通知 (只用 startNotifications, 绝不手写 0x2902 描述符)
-    if(notifyChar){
-      try{
-        notifyChar.addEventListener("characteristicvaluechanged", ev => {
-          const v = new Uint8Array(ev.target.value.buffer || ev.target.value);
-          log("📨 通知: " + hex(v));
-        });
-        await notifyChar.startNotifications();
-        log("🔔 已订阅通知");
-      }catch(e){ log("⚠️ 通知订阅失败: " + e.message); }
-    } else {
-      log("⚠️ 没找到通知特征");
-    }
-
-    // Pro 初始化帧: [SEQ] 01 00 01 00 C8 11 01
-    if($("init-mode").value === "on"){
-      try{
-        const init = new Uint8Array([seqByte(),0x01,0x00,0x01,0x00,0xC8,0x11,0x01]);
-        await writeBytes(init);
-        log("🔧 初始化帧已发 [" + hex(init) + "]");
-        await new Promise(r => setTimeout(r, 1200));
-      }catch(e){ log("⚠️ 初始化帧失败: " + e.message); }
-    }
-
-    $("ble-status").innerHTML = '<span class="pill connected">已连接</span> ' + (bleDevice.name||name);
-    log("✅ BLE 已连接");
-    $("btn-disconnect").disabled = false;
-    $("btn-connect").disabled = true;
-    startKeepAlive();
-    try { await sendBLE("vibration", 0); } catch(e){}
-    updatePresetButtons();
+    await linkGatt(bleDevice, all, wuuid);
+    onBLEReady();
   }catch(e){
     log("❌ 连接失败: " + (e && e.message ? e.message : e));
     $("ble-status").innerHTML = '<span class="pill stopped">失败</span>';
   }
+}
+
+// 抽出来给自动重连复用
+async function linkGatt(dev, all, wuuid){
+  const server = await dev.gatt.connect();
+  dev.addEventListener("gattserverdisconnected", () => {
+    log("🔌 BLE 被断开");
+    $("ble-status").innerHTML = '<span class="pill stopped">未连接</span>';
+    $("btn-disconnect").disabled = true;
+    $("btn-connect").disabled = false;
+    writeChar = null; lastFrame = null;
+    stopKeepAlive(); stopWave(); stopProbe();
+  });
+
+  for(const s of all){
+    let svc;
+    try { svc = await server.getPrimaryService(s); } catch(e){ continue; }
+    try{
+      const chars = await svc.getCharacteristics();
+      for(const ch of chars){
+        const p = ch.properties || {};
+        if((p.write || p.writeWithoutResponse) && !writeChar){
+          if(wuuid && ch.uuid.indexOf(wuuid.slice(0,8)) !== 0) continue;
+          writeChar = ch;
+          log("✅ 写入特征: " + ch.uuid);
+        }
+        if(p.notify && !notifyChar && ch.uuid.indexOf(NOTIFY_UUID.slice(0,8)) === 0){
+          notifyChar = ch;
+        }
+      }
+    }catch(e){}
+  }
+  if(!writeChar) throw new Error("没找到可写 characteristic");
+
+  // 订阅通知 (只用 startNotifications, 绝不手写 0x2902 描述符)
+  if(notifyChar){
+    try{
+      notifyChar.addEventListener("characteristicvaluechanged", ev => {
+        const v = new Uint8Array(ev.target.value.buffer || ev.target.value);
+        log("📨 通知: " + hex(v));
+      });
+      await notifyChar.startNotifications();
+      log("🔔 已订阅通知");
+    }catch(e){ log("⚠️ 通知订阅失败: " + e.message); }
+  } else {
+    log("⚠️ 没找到通知特征");
+  }
+
+  // Pro 初始化帧: [SEQ] 01 00 01 00 C8 11 01
+  if($("init-mode").value === "on"){
+    try{
+      const init = new Uint8Array([seqByte(),0x01,0x00,0x01,0x00,0xC8,0x11,0x01]);
+      await writeBytes(init);
+      log("🔧 初始化帧已发 [" + hex(init) + "]");
+      await new Promise(r => setTimeout(r, 1200));
+    }catch(e){ log("⚠️ 初始化帧失败: " + e.message); }
+  }
+  return server;
+}
+
+function onBLEReady(){
+  $("ble-status").innerHTML = '<span class="pill connected">已连接</span> ' + (bleDevice.name||"");
+  log("✅ BLE 已连接");
+  $("btn-disconnect").disabled = false;
+  $("btn-connect").disabled = true;
+  startKeepAlive();
+  try { sendBLE("vibration", 0); } catch(e){}
+  updatePresetButtons();
 }
 
 function disconnectBLE(){
@@ -549,7 +559,155 @@ function saveCfg(){
 ["device-name","service-uuid","write-uuid","mode-select","seq-mode","init-mode"].forEach(id => $(id).addEventListener("change", saveCfg));
 
 renderProbeList();
-log("✨ 页面已加载 (v2 · Pro 兼容)");
+log("✨ 页面已加载 (v3 · Pro 兼容 + 自动重连 + 保活)");
+</script>
+
+<script>
+/* ===== 保活模块: 让 Android 浏览器在后台不冻结页面 =====
+   三个手段一起上:
+   1) 静音 WAV 循环播放 —— Android 判定为"正在播放媒体", 不冻结页面 (主力)
+   2) Screen Wake Lock —— 尽量阻止熄屏
+   3) Bluefy 专有的 setScreenDimEnabled(false)
+*/
+(function () {
+  var audio = null, wakeLock = null, started = false;
+
+  function silentWavURL() {
+    var sr = 8000, n = sr;
+    var buf = new ArrayBuffer(44 + n * 2), v = new DataView(buf);
+    function ws(o, s) { for (var i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); }
+    ws(0,'RIFF'); v.setUint32(4,36+n*2,true); ws(8,'WAVE'); ws(12,'fmt ');
+    v.setUint32(16,16,true); v.setUint16(20,1,true); v.setUint16(22,1,true);
+    v.setUint32(24,sr,true); v.setUint32(28,sr*2,true); v.setUint16(32,2,true); v.setUint16(34,16,true);
+    ws(36,'data'); v.setUint32(40,n*2,true);
+    return URL.createObjectURL(new Blob([buf], {type:'audio/wav'}));
+  }
+
+  async function acquireWakeLock() {
+    try {
+      if (navigator.wakeLock && !wakeLock) {
+        wakeLock = await navigator.wakeLock.request('screen');
+        wakeLock.addEventListener('release', function(){ wakeLock = null; });
+      }
+    } catch(e){}
+  }
+
+  async function start() {
+    if (started) return;
+    started = true;
+    try {
+      if (navigator.bluetooth && typeof navigator.bluetooth.setScreenDimEnabled === 'function')
+        await navigator.bluetooth.setScreenDimEnabled(false);
+    } catch(e){}
+    await acquireWakeLock();
+    try {
+      if (!audio) {
+        audio = new Audio(silentWavURL());
+        audio.loop = true; audio.volume = 0.01;
+      }
+      await audio.play();
+      log('🔇 静音保活已开 (页面不会被系统冻结)');
+    } catch(e){ log('⚠️ 静音保活失败: ' + (e && e.message ? e.message : e)); }
+  }
+
+  document.addEventListener('visibilitychange', function(){
+    if (document.visibilityState === 'visible') start();
+  });
+  window.addEventListener('focus', start);
+  window.addEventListener('pageshow', start);
+
+  if (document.readyState === 'complete' || document.readyState === 'interactive') setTimeout(start, 500);
+  else window.addEventListener('DOMContentLoaded', function(){ setTimeout(start, 500); });
+
+  window.keepalive = { start: start };
+})();
+</script>
+
+<script>
+/* ===== 自动重连模块 =====
+   浏览器会记住授权过的 BLE 设备。页面一打开就自动:
+     1. 启动中继 (SSE + 轮询)
+     2. 找到上次授权过的设备并直接连上 (免弹窗)
+   以后每天只要打开这个网址, 什么都不用点。
+*/
+(function () {
+  var SERVICE_UUIDS = [
+    "0000ee01-0000-1000-8000-00805f9b34fb",
+    "0000eee0-0000-1000-8000-00805f9b34fb",
+    "0000fef0-0000-1000-8000-00805f9b34fb",
+    "0000fff0-0000-1000-8000-00805f9b34fb",
+    "0000ffe0-0000-1000-8000-00805f9b34fb",
+    "0000fde0-0000-1000-8000-00805f9b34fb",
+    "0000aa00-0000-1000-8000-00805f9b34fb"
+  ];
+
+  function knownDevices() {
+    try {
+      if (!navigator.bluetooth || !navigator.bluetooth.getDevices) return Promise.resolve([]);
+      return navigator.bluetooth.getDevices();
+    } catch(e){ return Promise.resolve([]); }
+  }
+
+  function takeOverButton() {
+    var old = $("btn-connect");
+    if (!old || old.dataset.autopatched) return;
+    var fresh = old.cloneNode(false);
+    old.parentNode.replaceChild(fresh, old);
+    fresh.dataset.autopatched = "1";
+    fresh.addEventListener("click", function () {
+      autoConnect().then(function (ok) {
+        if (!ok) log("⚠️ 没有已授权设备, 请在弹窗里选择一次 (之后会自动记住)");
+      });
+    });
+  }
+
+  function autoConnect() {
+    return knownDevices().then(function (devs) {
+      if (!devs || !devs.length) return false;
+      var prefix = ($("device-name") ? $("device-name").value.trim() : "SOSEXY") || "SOSEXY";
+      var up = prefix.toUpperCase();
+      var cand = devs.filter(function (d) { return (d.name || "").toUpperCase().indexOf(up) === 0; });
+      if (!cand.length) {
+        log("♻️ 有已授权设备 (" + devs.map(function(d){return d.name;}).join(", ") + ") 但名字不匹配");
+        return false;
+      }
+      log("♻️ 自动重连: " + cand[0].name);
+      var all = SERVICE_UUIDS.slice();
+      var wuuid = $("write-uuid") ? $("write-uuid").value.trim() : "";
+      return linkGatt(cand[0], all, wuuid).then(function(){
+        bleDevice = cand[0];
+        onBLEReady();
+        return true;
+      }).catch(function (e) {
+        log("⚠️ 自动重连失败: " + (e && e.message ? e.message : e));
+        return false;
+      });
+    });
+  }
+
+  function boot() {
+    takeOverButton();
+    try {
+      if (typeof startRelay === "function" && $("btn-start") && !$("btn-start").disabled) startRelay();
+      else if (typeof startRelay === "function") startRelay();
+    } catch(e){ log("⚠️ 自动启动中继失败: " + e.message); }
+
+    setTimeout(function () {
+      knownDevices().then(function (devs) {
+        if (devs && devs.length) {
+          log("♻️ 检测到 " + devs.length + " 个已授权设备, 正在自动连接...");
+          autoConnect();
+        } else {
+          log("💡 首次使用: 点「连接 BLE」选一次设备, 之后每次打开本页都会自动连上");
+          $("auto-hint").textContent = "💡 首次使用需手点一次「连接 BLE」授权设备, 之后每次打开本页自动重连";
+        }
+      });
+    }, 700);
+  }
+
+  if (document.readyState === "complete" || document.readyState === "interactive") setTimeout(boot, 0);
+  else window.addEventListener("DOMContentLoaded", boot);
+})();
 </script>
 </body>
 </html>
