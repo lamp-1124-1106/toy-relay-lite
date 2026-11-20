@@ -34,4 +34,9 @@ RikkaHub MCP: Streamable HTTP · http://127.0.0.1:8765/mcp/ · 头留空 · 已�
 6. GitHub raw 超时 → **jsdelivr 镜像** + os.replace 原子写
 7. rm 删不掉非空目录 → find -depth，或不管
 
+## 输出习惯
+
+- 说明步骤时**一条一个消息气泡**发，别塞在一个气泡里
+- 命令**一条一条**给，方便她复制
+
 ## 完整版看 MEMORY.md
