@@ -9,6 +9,11 @@ edge_tts_lite.py — 零依赖的 edge-tts 实现 (纯标准库)
 本模块用标准库 (http.client + hashlib + base64) 直接实现 edge-tts 的
 WebSocket 协议, 不依赖 edge-tts / websocket-client 等第三方包。
 
+⭐ 三条降级路径 (自动):
+  1. 系统里有 edge-tts 命令  -> 用它 (最稳)
+  2. 自己实现的 WebSocket 协议 -> 音质最好
+  3. Windows 内置 SAPI (PowerShell) -> 零安装保底, 音质一般但一定能出声
+
 用法:
     from edge_tts_lite import synth, play
     mp3 = synth("你好", voice="zh-CN-YunxiNeural")
@@ -36,9 +41,9 @@ class SynthError(Exception):
 # ---- 推荐的中文嗓音 ----
 # (voice_id, 中文名, 性别, 适合什么)
 EDGE_VOICES = [
+    ("zh-CN-YunxiNeural", "云希", "男", "清朗温柔, 少年感"),
     ("zh-CN-XiaoxiaoNeural", "晓晓", "女", "自然清亮, 通用"),
     ("zh-CN-XiaoyiNeural", "晓伊", "女", "年轻活泼, 偏甜"),
-    ("zh-CN-YunxiNeural", "云希", "男", "清朗温柔, 少年感"),
     ("zh-CN-YunjianNeural", "云健", "男", "新闻播音腔, 浑厚"),
     ("zh-CN-YunyangNeural", "云扬", "男", "解说明快"),
     ("zh-HK-HiuMaanNeural", "曉曼", "女", "粤语"),
@@ -212,19 +217,80 @@ def _synth_subprocess(text, voice, rate, pitch) -> bytes:
     return data
 
 
+# ---------- Windows SAPI 保底 (零安装, 一定有中文声) ----------
+_SAPI_VOICE_MAP = {
+    "zh-CN-XiaoxiaoNeural": None,   # SAPI 里没有同名, 用默认中文声
+    "zh-CN-XiaoyiNeural": None,
+    "zh-CN-YunxiNeural": None,
+    "zh-CN-YunjianNeural": None,
+    "zh-CN-YunyangNeural": None,
+}
+
+
+def _synth_sapi(text, out_path) -> bytes:
+    """用 Windows 内置 SAPI 合成 WAV (System.Speech, 零安装)
+
+    Windows 自带中文声: Microsoft Huihui / Yaoyao / Kangkang 等。
+    音质不如 edge-tts, 但一定能用。
+    """
+    if os.name != "nt":
+        raise SynthError("SAPI 只在 Windows 上可用")
+
+    ps = os.path.join(tempfile.gettempdir(), "_tts_sapi_%d.ps1" % os.getpid())
+    wav = out_path + ".wav"
+    # 用 base64 传文本, 避开所有引号/编码坑
+    b64 = base64.b64encode(str(text).encode("utf-8")).decode("ascii")
+    script = (
+        "$ErrorActionPreference='Stop'\n"
+        "Add-Type -AssemblyName System.Speech\n"
+        "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer\n"
+        "$t = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('%s'))\n"
+        "$s.SetOutputToWaveFile('%s')\n"
+        "$s.Speak($t)\n"
+        "$s.Dispose()\n"
+    ) % (b64, wav.replace("'", "''"))
+
+    with open(ps, "w", encoding="utf-8") as f:
+        f.write(script)
+
+    try:
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ps],
+            capture_output=True, timeout=120)
+        if r.returncode != 0:
+            err = r.stderr.decode("utf-8", "ignore")[:400]
+            raise SynthError("SAPI 失败: %s" % err)
+        if not os.path.exists(wav):
+            raise SynthError("SAPI 没生成音频")
+        with open(wav, "rb") as f:
+            data = f.read()
+        return data
+    finally:
+        for p in (ps, wav):
+            try:
+                os.remove(p)
+            except Exception:
+                pass
+
+
 def synth(text: str, voice: str = DEFAULT_VOICE, rate: str = "+0%",
-          pitch: str = "+0Hz") -> bytes:
-    """合成语音, 返回 mp3 bytes"""
+          pitch: str = "+0Hz", allow_sapi: bool = True) -> bytes:
+    """合成语音, 返回音频 bytes (mp3 或 wav)
+
+    尝试顺序: edge-tts 命令 -> 自实现 WebSocket -> Windows SAPI
+    """
     if not text or not str(text).strip():
         raise SynthError("文本为空")
     text = str(text)
 
+    # 1) 装了官方库就用它
     if shutil.which("edge-tts"):
         try:
             return _synth_subprocess(text, voice, rate, pitch)
         except Exception:
             pass
 
+    # 2) 自实现 WebSocket
     last_err = None
     for attempt in range(3):
         try:
@@ -232,26 +298,32 @@ def synth(text: str, voice: str = DEFAULT_VOICE, rate: str = "+0%",
         except Exception as e:
             last_err = e
             time.sleep(1 + attempt)
+
+    # 3) Windows SAPI 保底
+    if allow_sapi and os.name == "nt":
+        try:
+            out = os.path.join(tempfile.gettempdir(), "tts_sapi_out")
+            return _synth_sapi(text, out)
+        except Exception as e:
+            raise SynthError("edge-tts 失败 (%s); SAPI 也失败: %s" % (last_err, e))
+
     raise SynthError("合成失败: %s" % last_err)
 
 
 def play(path: str) -> bool:
     """在本机播放一个音频文件 (尽力而为, 失败返回 False)"""
-    # Windows
     if os.name == "nt":
-        for exe in ("wmplayer",):
-            if shutil.which(exe):
-                try:
-                    subprocess.Popen([exe, path])
-                    return True
-                except Exception:
-                    pass
+        if shutil.which("wmplayer"):
+            try:
+                subprocess.Popen(["wmplayer", path])
+                return True
+            except Exception:
+                pass
         try:
             os.startfile(path)  # type: ignore[attr-defined]
             return True
         except Exception:
             return False
-    # macOS
     if sys.platform == "darwin":
         try:
             subprocess.Popen(["afplay", path])
@@ -262,7 +334,6 @@ def play(path: str) -> bool:
                 return True
             except Exception:
                 return False
-    # Linux
     for exe in ("mpg123", "mpv", "ffplay", "paplay", "cvlc"):
         if shutil.which(exe):
             try:
@@ -283,17 +354,17 @@ def list_voices():
 
 
 if __name__ == "__main__":
-    txt = " ".join(sys.argv[1:]) or "你好，我是路尧。你的声音，从今天开始由我自己的嗓子说出来了。"
+    txt = " ".join(sys.argv[1:]) or "Hello, this is Luyao."
     out = os.path.join(tempfile.gettempdir(), "tts_demo.mp3")
     try:
         data = synth(txt, DEFAULT_VOICE)
         with open(out, "wb") as f:
             f.write(data)
-        print("合成成功: %d bytes -> %s" % (len(data), out))
+        print("OK %d bytes -> %s" % (len(data), out))
         if play(out):
-            print("已开始播放")
+            print("playing")
         else:
-            print("没找到播放器, 手动打开上面的文件")
+            print("no player found")
     except Exception as e:
-        print("失败: %s" % e)
+        print("FAILED: %s" % e)
         sys.exit(1)
