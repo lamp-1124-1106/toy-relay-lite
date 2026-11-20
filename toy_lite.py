@@ -1,22 +1,27 @@
 """
-toy_lite.py — 零依赖玩具中继 + MCP 服务 (v3)
+toy_lite.py — 零依赖玩具中继 + MCP 服务 (v4)
 只用 Python 标准库, 不需要 fastapi / uvicorn / mcp / pydantic。
-手机 (Pydroid 3) 上可直接跑。
+手机 (Pydroid 3) 或电脑 (Windows / macOS / Linux) 都能跑。
 
-  python toy_lite.py            # 监听 127.0.0.1:8765
-  PORT=9000 python toy_lite.py # 换端口
+  # 手机 (Pydroid 3): 只监听本机
+  python toy_lite.py
 
-v3 相比 v2 的修复 (都是实战踩出来的):
-  1. 监听队列 request_queue_size 5 -> 256
-     默认值太小, 队列一满内核直接丢 SYN, 客户端表现为
-     "connect timeout" (而不是 connection refused) —— Android 上特别难查。
-  2. /mcp/ 的 GET 流只发 keepalive 注释, 绝不混入玩具状态 JSON
-     v2 把 {"cmd":"set"} 当 JSON-RPC 推给客户端, 会污染协议流。
-  3. HTTP/1.1 keep-alive 连接加 idle timeout (60s), 防止线程堆积。
-  4. 每个 initialize 生成独立 session id, 正确回传 Mcp-Session-Id。
-  5. 回显 MCP-Protocol-Version 头。
-  6. 补齐 resources/list / prompts/list / logging/setLevel 等客户端必调的接口。
-  7. socket 开 TCP keepalive + TCP_NODELAY。
+  # 电脑: 监听局域网, 让手机上的 RikkaHub 能连进来
+  HOST=0.0.0.0 python toy_lite.py
+
+  # 电脑 + 加访问口令 (暴露到局域网时强烈建议)
+  HOST=0.0.0.0 TOKEN=你的口令 python toy_lite.py
+
+  # Windows 电脑直接双击 run_pc.bat 即可
+
+环境变量:
+  HOST   监听地址, 默认 127.0.0.1 (本机) / 可设 0.0.0.0 (局域网)
+  PORT   端口, 默认 8765
+  TOKEN  可选。设了之后 /mcp /state /toy/* 需要请求头 X-API-Key
+
+v4 相比 v3:
+  - HOST / TOKEN 环境变量支持 (电脑版必备)
+  - 启动时打印局域网访问地址和本机 IP
 """
 import json
 import os
@@ -28,20 +33,21 @@ import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-HOST = "127.0.0.1"
+HOST = os.environ.get("HOST", "127.0.0.1")
 PORT = int(os.environ.get("PORT", "8765"))
+TOKEN = os.environ.get("TOKEN", "").strip()
 ROOT = os.path.dirname(os.path.abspath(__file__))
 STATE_PATH = os.path.join(ROOT, "state", "state.json")
 
 MOTORS = ("suction", "vibration", "electric")
 MOTOR_CN = {"suction": "吮吸", "vibration": "震动", "electric": "电流"}
 
-SUPPORTED_PROTOLS = ("2025-06-18", "2025-03-26", "2024-11-05")
+SUPPORTED_PROTOOLS = ("2025-06-18", "2025-03-26", "2024-11-05")
 
 _lock = threading.Lock()
-_subs = []       # 玩具状态 SSE 订阅者
-_sessions = {}   # session_id -> {"created": ts}
-SSE_IDLE = 20.0  # SSE 心跳间隔 (秒)
+_subs = []
+_sessions = {}
+SSE_IDLE = 20.0
 
 
 # ---------------- 状态 ----------------
@@ -263,14 +269,13 @@ def new_session():
 
 
 def handle_mcp(req, sid):
-    """req: 已解析的 JSON-RPC 字典 -> (响应 dict 或 None, 新 session id 或 None)"""
     method = req.get("method", "")
     rid = req.get("id")
     params = req.get("params") or {}
 
     if method == "initialize":
         want = params.get("protocolVersion")
-        ver = want if want in SUPPORTED_PROTOLS else SUPPORTED_PROTOLS[0]
+        ver = want if want in SUPPORTED_PROTOOLS else SUPPORTED_PROTOOLS[0]
         new_sid = new_session()
         return {
             "jsonrpc": "2.0",
@@ -278,19 +283,16 @@ def handle_mcp(req, sid):
             "result": {
                 "protocolVersion": ver,
                 "capabilities": {"tools": {"listChanged": False}},
-                "serverInfo": {"name": "toy-lite", "version": "3.0.0"},
+                "serverInfo": {"name": "toy-lite", "version": "4.0.0"},
             },
         }, new_sid
 
     if method in ("notifications/initialized", "initialized"):
         return None, None
-
     if method == "ping":
         return {"jsonrpc": "2.0", "id": rid, "result": {}}, None
-
     if method == "tools/list":
         return {"jsonrpc": "2.0", "id": rid, "result": {"tools": TOOLS}}, None
-
     if method == "tools/call":
         name = params.get("name", "")
         args = params.get("arguments") or {}
@@ -301,7 +303,6 @@ def handle_mcp(req, sid):
             result = {"content": [{"type": "text", "text": "❌ %s" % e}], "isError": True}
         return {"jsonrpc": "2.0", "id": rid, "result": result}, None
 
-    # 以下是一些客户端会顺手调的接口, 返回空结果而不是 "method not found"
     if method == "resources/list":
         return {"jsonrpc": "2.0", "id": rid, "result": {"resources": []}}, None
     if method == "resources/templates/list":
@@ -311,7 +312,8 @@ def handle_mcp(req, sid):
     if method == "logging/setLevel":
         return {"jsonrpc": "2.0", "id": rid, "result": {}}, None
     if method == "completion/complete":
-        return {"jsonrpc": "2.0", "id": rid, "result": {"completion": {"values": [], "hasMore": False}}}, None
+        return {"jsonrpc": "2.0", "id": rid,
+                "result": {"completion": {"values": [], "hasMore": False}}}, None
     if method in ("notifications/cancelled", "notifications/progress", "notifications/roots/list_changed"):
         return None, None
 
@@ -339,9 +341,9 @@ def handle_mcp_batch(reqs, sid):
 
 # ---------------- HTTP ----------------
 class Handler(BaseHTTPRequestHandler):
-    server_version = "ToyLite/3.0"
+    server_version = "ToyLite/4.0"
     protocol_version = "HTTP/1.1"
-    timeout = 60          # keep-alive 空闲连接 60s 后回收, 防止线程堆积
+    timeout = 60
     disable_nagle_algorithm = True
 
     def log_message(self, fmt, *a):
@@ -353,9 +355,18 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
         self.send_header("Access-Control-Expose-Headers", "Mcp-Session-Id, Mcp-Protocol-Version")
 
+    def _auth_ok(self):
+        if not TOKEN:
+            return True
+        key = self.headers.get("X-API-Key") or ""
+        if not key:
+            auth = self.headers.get("Authorization") or ""
+            key = auth.replace("Bearer ", "").strip()
+        return key == TOKEN
+
     def _proto_version(self):
         v = self.headers.get("MCP-Protocol-Version")
-        return v if v in SUPPORTED_PROTOLS else None
+        return v if v in SUPPORTED_PROTOOLS else None
 
     def _json(self, obj, code=200, extra=None, sid=None):
         body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
@@ -429,11 +440,14 @@ class Handler(BaseHTTPRequestHandler):
         path = urllib.parse.urlparse(self.path).path.rstrip("/") or "/"
 
         if path in ("/", "/health"):
-            self._json({"ok": True, "service": "toy-lite", "version": "3.0.0",
+            self._json({"ok": True, "service": "toy-lite", "version": "4.0.0",
                         "ts": int(time.time() * 1000)})
             return
 
         if path == "/state":
+            if not self._auth_ok():
+                self._json({"error": "需要 X-API-Key"}, 401)
+                return
             self._json(read_state())
             return
 
@@ -446,8 +460,6 @@ class Handler(BaseHTTPRequestHandler):
                 self._html("<h1>relay.html 找不到</h1><p>%s</p>" % e, 500)
             return
 
-        # --- MCP 的 GET 流 ---
-        # 只发 keepalive 注释, 绝不混入玩具状态 JSON (v2 的 bug)
         if path.startswith("/mcp"):
             sid = self.headers.get("Mcp-Session-Id")
             self._sse_headers(sid)
@@ -462,7 +474,6 @@ class Handler(BaseHTTPRequestHandler):
                 self._end_chunk()
             return
 
-        # --- 玩具状态 SSE ---
         if path == "/stream":
             self._sse_headers()
             q = queue.Queue(maxsize=200)
@@ -497,6 +508,10 @@ class Handler(BaseHTTPRequestHandler):
         raw = self.rfile.read(n) if n else b""
 
         if path.startswith("/mcp"):
+            if not self._auth_ok():
+                self._json({"jsonrpc": "2.0", "id": None,
+                            "error": {"code": -32001, "message": "需要 X-API-Key 请求头"}}, 401)
+                return
             sid = self.headers.get("Mcp-Session-Id")
             try:
                 req = json.loads(raw.decode("utf-8"))
@@ -537,6 +552,9 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if path.startswith("/toy/"):
+            if not self._auth_ok():
+                self._json({"ok": False, "error": "需要 X-API-Key"}, 401)
+                return
             action = path.split("/")[-1]
             try:
                 body = json.loads(raw.decode("utf-8")) if raw else {}
@@ -565,7 +583,6 @@ class Server(ThreadingHTTPServer):
     daemon_threads = True
     block_on_close = False
     allow_reuse_address = True
-    # 关键: 默认只有 5, 队列一满内核直接丢 SYN -> connect timeout
     request_queue_size = 256
 
     def get_request(self):
@@ -578,18 +595,44 @@ class Server(ThreadingHTTPServer):
         return sock, addr
 
 
+def local_ip():
+    """拿本机在局域网里的 IP (连不上的话返回空)"""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("10.255.255.255", 1))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        try:
+            return socket.gethostbyname(socket.gethostname())
+        except Exception:
+            return ""
+
+
 def main():
     os.makedirs(os.path.dirname(STATE_PATH), exist_ok=True)
     if not os.path.exists(STATE_PATH):
         write_state(default_state())
     srv = Server((HOST, PORT), Handler)
-    print("=" * 46, flush=True)
-    print("  Toy Lite v3 · 零依赖玩具中继 + MCP", flush=True)
-    print("  控制页: http://%s:%d/relay/" % (HOST, PORT), flush=True)
-    print("  MCP   : http://%s:%d/mcp/" % (HOST, PORT), flush=True)
-    print("  队列  : %d   keepalive超时: %ds" % (srv.request_queue_size, Handler.timeout), flush=True)
+    ip = local_ip()
+    print("=" * 52, flush=True)
+    print("  Toy Lite v4 · 零依赖玩具中继 + MCP", flush=True)
+    print("=" * 52, flush=True)
+    print("  本机控制页: http://127.0.0.1:%d/relay/" % PORT, flush=True)
+    if HOST in ("0.0.0.0", "::"):
+        print("  手机连这个: http://%s:%d/mcp/" % (ip or "<你的电脑IP>", PORT), flush=True)
+        print("  (手机和电脑要在同一个 Wi-Fi)", flush=True)
+    else:
+        print("  MCP       : http://127.0.0.1:%d/mcp/" % PORT, flush=True)
+    if TOKEN:
+        print("  访问口令  : X-API-Key: %s" % TOKEN, flush=True)
+    elif HOST in ("0.0.0.0", "::"):
+        print("  ⚠️  未设口令, 同一 Wi-Fi 下其他设备也能控制玩具", flush=True)
+        print("     建议用 TOKEN=xxx 启动", flush=True)
+    print("  队列      : %d   keepalive: %ds" % (srv.request_queue_size, Handler.timeout), flush=True)
     print("  按 Ctrl+C 停止", flush=True)
-    print("=" * 46, flush=True)
+    print("=" * 52, flush=True)
     try:
         srv.serve_forever(poll_interval=0.2)
     except KeyboardInterrupt:
