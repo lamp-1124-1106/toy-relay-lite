@@ -63,6 +63,9 @@
   .probe-item{font-size:11px;font-family:ui-monospace,Menlo,monospace;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.2);border-radius:10px;padding:8px 10px;text-align:center;color:var(--soft)}
   .probe-item.done{background:rgba(136,200,152,.2);border-color:rgba(136,200,152,.5);color:#3f6b4f}
   .probe-item.active{background:rgba(232,200,120,.25);border-color:rgba(232,200,120,.6);color:#8a6a20}
+  .device-row{display:flex;gap:8px;align-items:center;margin-top:8px}
+  .device-row input{flex:1}
+  .device-row button{flex:0 0 auto;padding:10px 14px;font-size:13px;min-height:42px}
 </style>
 </head>
 <body>
@@ -86,9 +89,17 @@
         </select>
       </div>
       <div>
-        <label>设备广播名 (前缀匹配)</label>
-        <input type="text" id="device-name" value="SOSEXY" />
+        <label>设备查找方式</label>
+        <select id="find-mode">
+          <option value="all">显示全部设备 (推荐)</option>
+          <option value="prefix">按名称前缀匹配</option>
+        </select>
       </div>
+    </div>
+    <label>设备名称前缀 (仅"按名称前缀"时用)</label>
+    <div class="device-row">
+      <input type="text" id="device-name" value="FUNF" />
+      <button class="glass-btn" id="btn-scan">🔍 扫描</button>
     </div>
     <label>Service UUID</label>
     <input type="text" id="service-uuid" value="0000ee01-0000-1000-8000-00805f9b34fb" />
@@ -110,8 +121,7 @@
     </div>
     <div class="ble-status" id="ble-status">未连接</div>
     <div class="hint">
-      广播名填 <code>SOSEXY</code> 可同时匹配 <code>SOSEXY</code> / <code>SOSEXY Pro</code>；
-      搜不到就试 <code>Bubblebei</code>。<br>
+      你的设备广播名是 <code>FUNF 啵啵贝 Pro</code>。用「显示全部设备」最省事，不用填名字。<br>
       ⚠️ 官方 App 必须先关掉蓝牙 —— BLE 同一时间只能被一个客户端连。
     </div>
   </div>
@@ -319,31 +329,40 @@ function hexToBytes(s){
 }
 
 // ===== 连接 =====
-async function connectBLE(){
-  const name = $("device-name").value.trim();
+function getFilterOptions(){
   const svcInput = $("service-uuid").value.trim();
-  const wuuid = $("write-uuid").value.trim();
-  if(!name){ log("❌ 请填设备名"); return; }
-
   const user = svcInput ? svcInput.split(/[,\s;]+/).map(s=>s.trim()).filter(Boolean) : [];
-  const all = [...new Set([...user, ...SERVICE_UUIDS])];
+  return [...new Set([...user, ...SERVICE_UUIDS])];
+}
+
+async function connectBLE(){
+  const prefix = $("device-name").value.trim() || "FUNF";
+  const useAll = $("find-mode").value === "all";
+  const all = getFilterOptions();
 
   try{
-    log("🔍 扫描 " + name + " ...");
-    bleDevice = await navigator.bluetooth.requestDevice({
-      filters:[{namePrefix:name}],
-      optionalServices: all
-    });
-    log("📡 找到 " + (bleDevice.name||name) + ", 连接中...");
-    await linkGatt(bleDevice, all, wuuid);
+    log("🔍 " + (useAll ? "列出附近所有 BLE 设备..." : ("扫描 " + prefix + " ...")));
+    let opts;
+    if(useAll){
+      // 列出所有设备 —— 最省事, 不用猜名字
+      opts = { acceptAllDevices: true, optionalServices: all };
+    } else {
+      opts = { filters:[{namePrefix:prefix}], optionalServices: all };
+    }
+    bleDevice = await navigator.bluetooth.requestDevice(opts);
+    log("📡 选中: " + (bleDevice.name || "(无名设备)") + ", 连接中...");
+    await linkGatt(bleDevice, all, $("write-uuid").value.trim());
     onBLEReady();
   }catch(e){
-    log("❌ 连接失败: " + (e && e.message ? e.message : e));
-    $("ble-status").innerHTML = '<span class="pill stopped">失败</span>';
+    if(e && (e.name === "NotFoundError" || e.message === "cancelled")){
+      log("ℹ️ 已取消选择");
+    } else {
+      log("❌ 连接失败: " + (e && e.message ? e.message : e));
+      $("ble-status").innerHTML = '<span class="pill stopped">失败</span>';
+    }
   }
 }
 
-// 抽出来给自动重连复用
 async function linkGatt(dev, all, wuuid){
   const server = await dev.gatt.connect();
   dev.addEventListener("gattserverdisconnected", () => {
@@ -373,7 +392,7 @@ async function linkGatt(dev, all, wuuid){
       }
     }catch(e){}
   }
-  if(!writeChar) throw new Error("没找到可写 characteristic");
+  if(!writeChar) throw new Error("没找到可写 characteristic (UUID 可能不对)");
 
   // 订阅通知 (只用 startNotifications, 绝不手写 0x2902 描述符)
   if(notifyChar){
@@ -520,6 +539,7 @@ function stopRelay(){
 $("btn-start").addEventListener("click", startRelay);
 $("btn-stop").addEventListener("click", stopRelay);
 $("btn-connect").addEventListener("click", connectBLE);
+$("btn-scan").addEventListener("click", connectBLE);
 $("btn-disconnect").addEventListener("click", disconnectBLE);
 $("mode-select").addEventListener("change", updatePresetButtons);
 $("btn-preset-gentle").addEventListener("click", () => runPreset("gentle"));
@@ -543,6 +563,7 @@ try{
   if(s.mode) $("mode-select").value = s.mode;
   if(s.seqMode) $("seq-mode").value = s.seqMode;
   if(s.initMode) $("init-mode").value = s.initMode;
+  if(s.findMode) $("find-mode").value = s.findMode;
 }catch(e){}
 function saveCfg(){
   try{
@@ -552,21 +573,21 @@ function saveCfg(){
       writeUuid:$("write-uuid").value,
       mode:$("mode-select").value,
       seqMode:$("seq-mode").value,
-      initMode:$("init-mode").value
+      initMode:$("init-mode").value,
+      findMode:$("find-mode").value
     }));
   }catch(e){}
 }
-["device-name","service-uuid","write-uuid","mode-select","seq-mode","init-mode"].forEach(id => $(id).addEventListener("change", saveCfg));
+["device-name","service-uuid","write-uuid","mode-select","seq-mode","init-mode","find-mode"].forEach(id => $(id).addEventListener("change", saveCfg));
 
 renderProbeList();
-log("✨ 页面已加载 (v3 · Pro 兼容 + 自动重连 + 保活)");
+log("✨ 页面已加载 (v4 · FUNF 啵啵贝 Pro + 保活 + 自动重连)");
 </script>
 
 <script>
 /* ===== 保活模块: 让 Android 浏览器在后台不冻结页面 =====
-   三个手段一起上:
-   1) 静音 WAV 循环播放 —— Android 判定为"正在播放媒体", 不冻结页面 (主力)
-   2) Screen Wake Lock —— 尽量阻止熄屏
+   1) 静音 WAV 循环 (主力: Android 判定为"正在播放媒体", 不冻结页面)
+   2) Screen Wake Lock
    3) Bluefy 专有的 setScreenDimEnabled(false)
 */
 (function () {
@@ -625,22 +646,9 @@ log("✨ 页面已加载 (v3 · Pro 兼容 + 自动重连 + 保活)");
 
 <script>
 /* ===== 自动重连模块 =====
-   浏览器会记住授权过的 BLE 设备。页面一打开就自动:
-     1. 启动中继 (SSE + 轮询)
-     2. 找到上次授权过的设备并直接连上 (免弹窗)
-   以后每天只要打开这个网址, 什么都不用点。
+   浏览器会记住授权过的 BLE 设备。页面一打开就自动启动中继 + 尝试自动重连。
 */
 (function () {
-  var SERVICE_UUIDS = [
-    "0000ee01-0000-1000-8000-00805f9b34fb",
-    "0000eee0-0000-1000-8000-00805f9b34fb",
-    "0000fef0-0000-1000-8000-00805f9b34fb",
-    "0000fff0-0000-1000-8000-00805f9b34fb",
-    "0000ffe0-0000-1000-8000-00805f9b34fb",
-    "0000fde0-0000-1000-8000-00805f9b34fb",
-    "0000aa00-0000-1000-8000-00805f9b34fb"
-  ];
-
   function knownDevices() {
     try {
       if (!navigator.bluetooth || !navigator.bluetooth.getDevices) return Promise.resolve([]);
@@ -648,31 +656,19 @@ log("✨ 页面已加载 (v3 · Pro 兼容 + 自动重连 + 保活)");
     } catch(e){ return Promise.resolve([]); }
   }
 
-  function takeOverButton() {
-    var old = $("btn-connect");
-    if (!old || old.dataset.autopatched) return;
-    var fresh = old.cloneNode(false);
-    old.parentNode.replaceChild(fresh, old);
-    fresh.dataset.autopatched = "1";
-    fresh.addEventListener("click", function () {
-      autoConnect().then(function (ok) {
-        if (!ok) log("⚠️ 没有已授权设备, 请在弹窗里选择一次 (之后会自动记住)");
-      });
-    });
-  }
-
   function autoConnect() {
     return knownDevices().then(function (devs) {
       if (!devs || !devs.length) return false;
-      var prefix = ($("device-name") ? $("device-name").value.trim() : "SOSEXY") || "SOSEXY";
+      var prefix = ($("device-name") ? $("device-name").value.trim() : "FUNF") || "FUNF";
       var up = prefix.toUpperCase();
       var cand = devs.filter(function (d) { return (d.name || "").toUpperCase().indexOf(up) === 0; });
       if (!cand.length) {
-        log("♻️ 有已授权设备 (" + devs.map(function(d){return d.name;}).join(", ") + ") 但名字不匹配");
-        return false;
+        // 名字不匹配就退而求其次: 用第一个已授权设备
+        log("♻️ 已授权设备: " + devs.map(function(d){return d.name;}).join(", ") + " (名字不匹配, 用第一个)");
+        cand = devs;
       }
-      log("♻️ 自动重连: " + cand[0].name);
-      var all = SERVICE_UUIDS.slice();
+      log("♻️ 自动重连: " + (cand[0].name || "(无名)"));
+      var all = getFilterOptions();
       var wuuid = $("write-uuid") ? $("write-uuid").value.trim() : "";
       return linkGatt(cand[0], all, wuuid).then(function(){
         bleDevice = cand[0];
@@ -686,10 +682,8 @@ log("✨ 页面已加载 (v3 · Pro 兼容 + 自动重连 + 保活)");
   }
 
   function boot() {
-    takeOverButton();
     try {
-      if (typeof startRelay === "function" && $("btn-start") && !$("btn-start").disabled) startRelay();
-      else if (typeof startRelay === "function") startRelay();
+      if (typeof startRelay === "function") startRelay();
     } catch(e){ log("⚠️ 自动启动中继失败: " + e.message); }
 
     setTimeout(function () {
