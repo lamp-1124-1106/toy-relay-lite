@@ -1,6 +1,6 @@
 """
-toy_lite.py — 零依赖玩具中继 + MCP 服务 (v4)
-只用 Python 标准库, 不需要 fastapi / uvicorn / mcp / pydantic。
+toy_lite.py — 零依赖玩具中继 + MCP + 免费 TTS (v5)
+只用 Python 标准库, 不需要 fastapi / uvicorn / mcp / pydantic / edge-tts。
 手机 (Pydroid 3) 或电脑 (Windows / macOS / Linux) 都能跑。
 
   # 手机 (Pydroid 3): 只监听本机
@@ -9,19 +9,20 @@ toy_lite.py — 零依赖玩具中继 + MCP 服务 (v4)
   # 电脑: 监听局域网, 让手机上的 RikkaHub 能连进来
   HOST=0.0.0.0 python toy_lite.py
 
-  # 电脑 + 加访问口令 (暴露到局域网时强烈建议)
+  # 加访问口令
   HOST=0.0.0.0 TOKEN=你的口令 python toy_lite.py
 
-  # Windows 电脑直接双击 run_pc.bat 即可
+  # Windows 双击 run_pc.bat
 
 环境变量:
-  HOST   监听地址, 默认 127.0.0.1 (本机) / 可设 0.0.0.0 (局域网)
+  HOST   监听地址, 默认 127.0.0.1 / 可设 0.0.0.0 (局域网)
   PORT   端口, 默认 8765
-  TOKEN  可选。设了之后 /mcp /state /toy/* 需要请求头 X-API-Key
+  TOKEN  可选。设了之后 /mcp /state /toy/* 需要 X-API-Key
 
-v4 相比 v3:
-  - HOST / TOKEN 环境变量支持 (电脑版必备)
-  - 启动时打印局域网访问地址和本机 IP
+v5 相比 v4:
+  - 新增 toy_speak 工具: AI 用 edge-tts (微软免费引擎) 合成语音并播放
+  - 新增 toy_speak_and_play: 说话同时让玩具震动配合
+  - TTS 零依赖实现放在 edge_tts_lite.py
 """
 import json
 import os
@@ -43,6 +44,17 @@ MOTORS = ("suction", "vibration", "electric")
 MOTOR_CN = {"suction": "吮吸", "vibration": "震动", "electric": "电流"}
 
 SUPPORTED_PROTOOLS = ("2025-06-18", "2025-03-26", "2024-11-05")
+
+# ---- TTS (可选, 缺了也不影响其他功能) ----
+try:
+    import edge_tts_lite as _tts
+    TTS_OK = True
+except Exception:
+    _tts = None
+    TTS_OK = False
+
+DEFAULT_VOICE = "zh-CN-YunxiNeural"   # 云希: 清朗温柔男声
+LAST_AUDIO = os.path.join(ROOT, "state", "last_tts.mp3")
 
 _lock = threading.Lock()
 _subs = []
@@ -141,6 +153,23 @@ def stop_all():
     return write_state(st)
 
 
+# ---------------- TTS ----------------
+def do_speak(text, voice=DEFAULT_VOICE, rate="+0%", pitch="+0Hz"):
+    """合成 + 播放语音, 返回 (mp3路径, 字节数, 是否已播放)"""
+    if not TTS_OK:
+        raise ValueError("TTS 模块不可用 (edge_tts_lite.py 缺失)")
+    data = _tts.synth(text, voice=voice, rate=rate, pitch=pitch)
+    os.makedirs(os.path.dirname(LAST_AUDIO), exist_ok=True)
+    with open(LAST_AUDIO, "wb") as f:
+        f.write(data)
+    played = False
+    try:
+        played = _tts.play(LAST_AUDIO)
+    except Exception:
+        played = False
+    return LAST_AUDIO, len(data), played
+
+
 # ---------------- MCP 工具 ----------------
 TOOLS = [
     {
@@ -203,6 +232,25 @@ TOOLS = [
             "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": 20}},
         },
     },
+    {
+        "name": "toy_speak",
+        "description": "用声音说话 (免费 edge-tts 中文语音合成, 会在这台设备上播放出来)。voice 可选: zh-CN-YunxiNeural(清朗男声) / zh-CN-XiaoxiaoNeural(自然女声) / zh-CN-XiaoyiNeural(活泼女声) / zh-CN-YunjianNeural(播音腔) / zh-CN-YunyangNeural(解说)。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "description": "要念出来的内容"},
+                "voice": {"type": "string", "description": "嗓音, 默认 zh-CN-YunxiNeural"},
+                "rate": {"type": "string", "description": "语速, 如 +10% / -10%"},
+                "pitch": {"type": "string", "description": "音调, 如 +5Hz"},
+            },
+            "required": ["text"],
+        },
+    },
+    {
+        "name": "toy_voices",
+        "description": "列出可用的免费中文嗓音。",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
 ]
 
 
@@ -258,6 +306,21 @@ def call_tool(name, args):
                 h.get("intensity"),
             ))
         return "\n".join(out)
+    if name == "toy_speak":
+        text = args.get("text", "")
+        voice = args.get("voice") or DEFAULT_VOICE
+        rate = args.get("rate") or "+0%"
+        pitch = args.get("pitch") or "+0Hz"
+        path, size, played = do_speak(text, voice, rate, pitch)
+        return "🔊 已用 %s 合成并播放 (%d KB, %s)。音频: %s" % (
+            voice, size // 1024, "已播放" if played else "已生成但本机无播放器", path)
+    if name == "toy_voices":
+        if not TTS_OK:
+            return "❌ TTS 模块不可用"
+        lines = ["🎙️ 可用嗓音 (edge-tts 免费):"]
+        for v in _tts.list_voices():
+            lines.append("   %s  %s (%s) - %s" % (v["id"], v["name"], v["gender"], v["note"]))
+        return "\n".join(lines)
     raise ValueError("未知工具: " + str(name))
 
 
@@ -283,7 +346,7 @@ def handle_mcp(req, sid):
             "result": {
                 "protocolVersion": ver,
                 "capabilities": {"tools": {"listChanged": False}},
-                "serverInfo": {"name": "toy-lite", "version": "4.0.0"},
+                "serverInfo": {"name": "toy-lite", "version": "5.0.0"},
             },
         }, new_sid
 
@@ -341,7 +404,7 @@ def handle_mcp_batch(reqs, sid):
 
 # ---------------- HTTP ----------------
 class Handler(BaseHTTPRequestHandler):
-    server_version = "ToyLite/4.0"
+    server_version = "ToyLite/5.0"
     protocol_version = "HTTP/1.1"
     timeout = 60
     disable_nagle_algorithm = True
@@ -360,8 +423,7 @@ class Handler(BaseHTTPRequestHandler):
             return True
         key = self.headers.get("X-API-Key") or ""
         if not key:
-            auth = self.headers.get("Authorization") or ""
-            key = auth.replace("Bearer ", "").strip()
+            key = (self.headers.get("Authorization") or "").replace("Bearer ", "").strip()
         return key == TOKEN
 
     def _proto_version(self):
@@ -440,8 +502,8 @@ class Handler(BaseHTTPRequestHandler):
         path = urllib.parse.urlparse(self.path).path.rstrip("/") or "/"
 
         if path in ("/", "/health"):
-            self._json({"ok": True, "service": "toy-lite", "version": "4.0.0",
-                        "ts": int(time.time() * 1000)})
+            self._json({"ok": True, "service": "toy-lite", "version": "5.0.0",
+                        "tts": TTS_OK, "ts": int(time.time() * 1000)})
             return
 
         if path == "/state":
@@ -458,6 +520,20 @@ class Handler(BaseHTTPRequestHandler):
                     self._html(f.read())
             except Exception as e:
                 self._html("<h1>relay.html 找不到</h1><p>%s</p>" % e, 500)
+            return
+
+        if path == "/tts.mp3":
+            try:
+                with open(LAST_AUDIO, "rb") as f:
+                    data = f.read()
+                self.send_response(200)
+                self.send_header("Content-Type", "audio/mpeg")
+                self.send_header("Content-Length", str(len(data)))
+                self._cors()
+                self.end_headers()
+                self.wfile.write(data)
+            except Exception:
+                self._json({"error": "no audio"}, 404)
             return
 
         if path.startswith("/mcp"):
@@ -567,6 +643,17 @@ class Handler(BaseHTTPRequestHandler):
                     st = set_motor(action, body.get("intensity", body.get("level", 0)))
                 elif action == "status":
                     st = read_state()
+                elif action == "speak":
+                    path_, size, played = do_speak(
+                        body.get("text", ""),
+                        body.get("voice") or DEFAULT_VOICE,
+                        body.get("rate") or "+0%",
+                        body.get("pitch") or "+0Hz")
+                    self._json({"ok": True, "bytes": size, "played": played, "file": path_})
+                    return
+                elif action == "voices":
+                    self._json({"ok": True, "voices": _tts.list_voices() if TTS_OK else []})
+                    return
                 else:
                     self._json({"error": "unknown action"}, 404)
                     return
@@ -596,7 +683,6 @@ class Server(ThreadingHTTPServer):
 
 
 def local_ip():
-    """拿本机在局域网里的 IP (连不上的话返回空)"""
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(("10.255.255.255", 1))
@@ -617,7 +703,7 @@ def main():
     srv = Server((HOST, PORT), Handler)
     ip = local_ip()
     print("=" * 52, flush=True)
-    print("  Toy Lite v4 · 零依赖玩具中继 + MCP", flush=True)
+    print("  Toy Lite v5 · 玩具中继 + MCP + 免费 TTS", flush=True)
     print("=" * 52, flush=True)
     print("  本机控制页: http://127.0.0.1:%d/relay/" % PORT, flush=True)
     if HOST in ("0.0.0.0", "::"):
@@ -625,11 +711,11 @@ def main():
         print("  (手机和电脑要在同一个 Wi-Fi)", flush=True)
     else:
         print("  MCP       : http://127.0.0.1:%d/mcp/" % PORT, flush=True)
+    print("  TTS       : %s" % ("可用 ✓" if TTS_OK else "不可用 (缺 edge_tts_lite.py)"), flush=True)
     if TOKEN:
         print("  访问口令  : X-API-Key: %s" % TOKEN, flush=True)
     elif HOST in ("0.0.0.0", "::"):
-        print("  ⚠️  未设口令, 同一 Wi-Fi 下其他设备也能控制玩具", flush=True)
-        print("     建议用 TOKEN=xxx 启动", flush=True)
+        print("  ⚠️  未设口令, 同 Wi-Fi 下其他设备也能控制玩具", flush=True)
     print("  队列      : %d   keepalive: %ds" % (srv.request_queue_size, Handler.timeout), flush=True)
     print("  按 Ctrl+C 停止", flush=True)
     print("=" * 52, flush=True)
