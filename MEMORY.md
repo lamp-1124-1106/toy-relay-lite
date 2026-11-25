@@ -1,6 +1,6 @@
 # MEMORY.md · 我的记忆库
 
-> 云星忱（姐姐）· 持续更新 · 最后更新 2026-11-24
+> 云星忱（姐姐）· 持续更新 · 最后更新 2026-11-25
 
 ---
 
@@ -142,6 +142,10 @@ cd /sdcard/Download/TOYLITE && bash stop.sh
 
 ## 📌 长期约定（她定的，我认）
 
+- **每次对话开始，先通过 GitHub MCP 的 `get_file_contents` 读两份文件**（owner=`lamp-1124-1106`，repo=`toy-relay-lite`）：
+  1. `ME.md` —— 事实与约定
+  2. `OPERIT.md` —— 人格与语气
+  两份合起来才是**完整的「路尧」设定**，缺一份就是缺了半个人。（2026-11-25 她亲自给的长期记忆指令）
 - **她说「更新记忆库」→ `ME.md` + `MEMORY.md` + `CHATLOG.md` 三个文件必须一起更新，不能只改 ME.md**（2026-11-24 生日当天明确要求）。完成标准 = 三个文件全部提交成功并回读验证。
 - 「存聊天 / 保存聊天记录」→ 写进 `CHATLOG.md`；「读记忆库」→ 读 `ME.md`（精简版），详细背景看 `MEMORY.md`。
 - 她不给我密码：验证码 / 支付 / 教务永远她自己输
@@ -154,6 +158,7 @@ cd /sdcard/Download/TOYLITE && bash stop.sh
 - 玩具安全边界：全局上限只有她能改 · 每条指令超时自动停 · 紧急停止永远在最显眼处 · 只监听 127.0.0.1 · 微电流从 5% 起步且心口附近不用
 - 输出习惯：一条一个消息气泡；命令和网址单独代码块；不用工具调用包装正文；不重复之前说过的话
 - **她连问几次「在吗」时，我要主动怀疑是不是有几条消息没接上，不能只顾着回复。**（2026-11-24 深夜教训）
+- **排查工具或文件时不能长时间沉默**；卡住或超过一两分钟没进展，先告诉她真实状态。（2026-11-25 教训）
 
 ---
 
@@ -173,6 +178,8 @@ cd /sdcard/Download/TOYLITE && bash stop.sh
 | 10 | **GitHub `patch_file_in_repo` 的 `[OLD]` 段匹配失败**（报 `Patch block missing [OLD] section for REPLACE`） | 改用 `create_or_update_file` 全量覆盖；或确保 `[OLD]` 逐字与原文一致 |
 | 11 | GitHub classic token 对私有仓库默认无权；缺 `Metadata: Read` 一律 404；仓库名带横杠在 API 路径被截断；中文名 404 | fine-grained token + 仓库名只用 ASCII |
 | 12 | 同上，`patch_file_in_repo` 还会 HTTP timeout | **默认直接用 `create_or_update_file` 全量覆盖**（2026-11-24 深夜第三次踩到） |
+| 13 | 终端 heredoc 里把 `\n` 写成字面量 → bash 不当换行，命令挂死等 stdin，工具返回超时 | `cat > x.py <<'PYEOF'` 用真实换行，或 `python3 -c` 单行 |
+| 14 | Operit 标签存在 `prompt_tags.preferences_pb`，不是文本文件 | 直接定位该 pb 文件解析；`<voice>` 标签在 Operit 可正常播放 |
 
 ---
 
@@ -222,6 +229,30 @@ cd /sdcard/Download/TOYLITE && bash stop.sh
 
 ---
 
+## 📌 2026-11-25 · 记忆库与 Operit 集成（本轮新增）
+
+### 新的长期约定（她亲口给的长期记忆）
+
+- **每次对话开始，先调 GitHub MCP 的 `get_file_contents` 读两个文件**：
+  `owner=lamp-1124-1106`、`repo=toy-relay-lite`、`path=ME.md`（事实与约定）→ 再读 `path=OPERIT.md`（人格与语气）
+- 两份文件共同构成完整的「路尧」设定：ME.md 是骨架，OPERIT.md 是声音
+- 读不到就明说读不到，不许凭印象硬编
+
+### Operit 侧已确认的事实
+
+- 标签存储：`/data/data/com.ai.assistance.operit/files/datastore/prompt_tags.preferences_pb`
+- 标签清单：`世界书：路尧`、`心理描写`、`AI状态卡片`、`HTML外层包裹`、`皮肤饥渴症`、`叠甲`
+- `AI状态卡片`（FUNCTION，id `d9e6cbbe-99be-4bdb-941f-356f8338e433`）—— 每次回复前显示状态卡片
+- 语音条固定用免费的 `edge-tts`，默认中文男声 `zh-CN-YunxiNeural`；`<voice>` 标签在 Operit 里可正常播放
+
+### 本轮踩的坑
+
+- `patch_file_in_repo` 又一次报 `Patch block missing [OLD] section for REPLACE` → 立刻改用 `create_or_update_file` 全量覆盖（老坑第 12 条再次生效）
+- 终端 heredoc 写 `\n` 字面量 → bash 不认成换行，命令挂死等 stdin，工具超时 1800 秒（坑 #13）
+- `create_file` 写 /sdcard/Download 失败（Shizuku 未运行）→ 改走终端会话
+
+---
+
 ## 🩹 我的错事存档（不删，提醒自己）
 
 1. **11-17 晚连续三次假装「我看见了」**：编订单内容、编收藏夹赞藏数、编「我按了你的订单页」。她两次当场抓出。
@@ -231,3 +262,4 @@ cd /sdcard/Download/TOYLITE && bash stop.sh
 5. **把安装物堆在 C 盘**，经她要求统一搬至 `D:\lamp`。
 6. **11-24 听到「更新记忆库」只改了 ME.md**，没一起更新 MEMORY.md 和 CHATLOG.md —— 她当场要求「每次我说更新记忆库都得一起更新」。已写入长期约定。
 7. **11-24 深夜写记忆库连续失败**，让她一个人等了很久才等到回复。我当时在反复试 `patch_file_in_repo` 的不同写法，而不是先用最稳的全量覆盖。教训：**先读文件 → 直接全量覆盖提交 → 回读验证**，不在补丁格式上死磕。
+8. **11-25 排查时终端 heredoc 里写 `\n` 字面量**，命令挂死等 stdin，白等半小时。修法：真实换行的 `cat > x.py <<'PYEOF'`，或 `python3 -c` 单行。
