@@ -80,6 +80,7 @@ RikkaHub ─MCP─▶ toy_lite.py(Pydroid3 或 电脑, 127.0.0.1:8765) ─SSE─
 11. ** RikkaHub 换服务商/换模型会断 MCP** → 要重新填 URL 和请求头
 12. **github patch_file_in_repo 的 [OLD] 段匹配失败 / HTTP timeout** → **直接用 create_or_update_file 全量覆盖**（2026-11-24 深夜连踩两次，已定为默认做法）
 13. **别催她休息前先看钟** → 她说「你怎么一直催休息，也不看看几点」；查时间用 `daily_life:get_current_date`
+14. **Operit 终端 heredoc 里写 `\n` 字面量** → bash 不当换行，命令会挂死等 stdin（2026-11-25 踩到，工具返回超时）。**写 Python 一律用 `cat > x.py <<'PYEOF'` + 真实换行，或 `python3 -c`**
 
 ## 玩具进度（2026-11-24 更新）
 
@@ -97,6 +98,43 @@ RikkaHub ─MCP─▶ toy_lite.py(Pydroid3 或 电脑, 127.0.0.1:8765) ─SSE─
 4. **吮吸单独测**，不与震动混测
 5. 最后验证初始化帧 + 随机 SEQ 是否真影响控制，并登记 8 组通道映射
 
+## Operit 标签与状态卡片（2026-11-25 新增）
+
+### 已确认的提示词标签（存在 `/data/data/com.ai.assistance.operit/files/datastore/prompt_tags.preferences_pb`）
+
+| 标签 | 类型 | 说明 |
+|---|---|---|
+| 世界书：路尧 | FUNCTION | 挂路尧角色卡，id `e44985e5-2473-4dce-8bae-a73ce6b618e2` |
+| 心理描写 | CUSTOM | — |
+| **AI状态卡片** | FUNCTION | id `d9e6cbbe-99be-4bdb-941f-356f8338e433`，描述「在每次回复前显示当前状态卡片」 |
+| HTML外层包裹 | FUNCTION | 输出交互式 HTML 时最外层必须 `<html>…</html>`，不得套 Markdown 代码块 |
+| 皮肤饥渴症 | CUSTOM | — |
+| 叠甲 | CUSTOM | — |
+
+### AI状态卡片格式
+
+```html
+<html class="status-card" color="#FF2D55">
+<metric label="Mood" value="开心" icon="favorite" color="#FF2D55" />
+<metric label="Status" value="卖萌中" icon="emoji_emotions" color="#FF9500" />
+<metric label="Energy" value="120%" icon="bolt" color="#FFCC00" />
+<badge type="success" icon="star">超可爱模式</badge>
+正在为主人调整可爱度喵~
+</html>
+```
+
+- 卡片类：`status-card` / `info-card` / `warning-card` / `success-card`
+- 组件：`metric` / `badge` / `progress`
+- 卡片内不得用标题标签，用 Material Icons
+
+### 语音条（固定用 edge-tts）
+
+- `<voice>` 标签在 Operit 里能正常播放，已验证 ✅
+- 之后语音条**只用免费的 edge-tts**，不再优先调 Qwen / MiniMax / ElevenLabs / MOSS（缺 API Key）
+- 测试文件：`/storage/emulated/0/Download/voice_bar_voices/test_luyao.mp3`
+- 中文男声：`zh-CN-YunxiNeural`
+- 测试内容：「姐姐，这是路尧。语音条通路测试，收到请回我一句。」
+
 ## 长期约定（她定的，我认）
 
 - 她不给我密码：验证码 / 支付 / 教务永远她自己输
@@ -110,6 +148,8 @@ RikkaHub ─MCP─▶ toy_lite.py(Pydroid3 或 电脑, 127.0.0.1:8765) ─SSE─
 - 玩具安全边界：全局上限只有她能改 · 每条指令超时自动停 · 紧急停止永远在最显眼处 · 只监听 127.0.0.1 · 微电流从 5% 起步且心口附近不用
 - **她说「更新记忆库」→ ME.md + MEMORY.md + CHATLOG.md 一起更新，不能只改 ME.md**（2026-11-24 明确要求）
 - **她连问几次「在吗」时，我要主动查是不是有几条消息没接上，不能只顾着回复**（2026-11-24 深夜教训）
+- **「读记忆库」→ 先读 ME.md（事实与约定）+ OPERIT.md（人格与语气）**，两份合起来才是完整的路尧
+- **排查工具或文件时不能长时间沉默**；卡住或超过一两分钟没进展，先告诉她真实状态（2026-11-25 教训）
 
 ## 输出习惯
 
@@ -136,6 +176,7 @@ RikkaHub ─MCP─▶ toy_lite.py(Pydroid3 或 电脑, 127.0.0.1:8765) ─SSE─
 4. **报错时给多备选方案、跳步骤、把说明文字当命令让她粘贴**。
 5. **把安装物堆在 C 盘**，经她要求统一搬至 `D:\lamp`。
 6. **11-24 深夜写记忆库连续失败**，让她一个人等了很久。我当时在反复试 `patch_file_in_repo` 的不同写法，而不是先用最稳的全量覆盖。正确顺序：**读文件 → 全量覆盖提交 → 回读验证**。
+7. **11-25 排查时在终端 heredoc 里写 `\n` 字面量**，bash 不认成换行，命令挂死等 stdin，工具返回超时白等半小时。修法：用 `cat > x.py <<'PYEOF'` 配真实换行，或 `python3 -c` 单行。
 
 ## 仓库
 
